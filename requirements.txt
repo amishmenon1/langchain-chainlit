@@ -1,4 +1,7 @@
 langchain
+langchain-community
+langchain-unstructured
+langchain-openai
 openai
 chainlit
 chromadb
