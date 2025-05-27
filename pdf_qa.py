@@ -16,6 +16,11 @@ from langchain_community.document_loaders import PyPDFLoader
 from dotenv import load_dotenv
 import json
 from typing import Dict, Any
+from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
+from templates.system.formatter import FORMATTER_SYSTEM_TEMPLATE
+from templates.system.analyzer import ANALYZER_SYSTEM_TEMPLATE
+from templates.welcome import WELCOME_MSG
+from templates.human.prompts import generate_routing_prompt, generate_general_conversation_prompt, generate_mixed_conversation_prompt, generate_medical_prompt, generate_analyzer_prompt, generate_eval_prompt, generate_alt_analysis_prompt, generate_alt_enhancement_prompt
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,150 +32,30 @@ text_splitter = RecursiveCharacterTextSplitter(
 )
 
 # Different system templates for different models
-RETRIEVER_SYSTEM_TEMPLATE = """You are a document retrieval specialist. Extract lab information from the medical documents.
 
-Please organize the information like this:
 
-NORMAL LAB RESULTS:
-- Test Name: Value Unit (Location)
-- Test Name: Value Unit (Location)
-
-ABNORMAL LAB RESULTS:
-- Test Name: Value Unit - Status (Location)
-- Test Name: Value Unit - Status (Location)
-
-TRENDS AND OBSERVATIONS:
-- Notable trend 1
-- Notable trend 2
-
-ADDITIONAL INFORMATION:
-- Key finding 1
-- Key finding 2
-
-Extract specific lab values, their units, normal/abnormal status, and any trends mentioned.
-
-Context:
-{summaries}"""
-
-ANALYZER_SYSTEM_TEMPLATE = """You are a Medical Expert who interprets patient data, synthesizes insights, and provides evidence-based medical guidance. You analyze structured data and provide personalized medical recommendations.
-
-CORE MEDICAL EXPERTISE:
-- You analyze structured patient health record data and provide medical expertise
-- You perform differential diagnoses, treatment planning, and insight generation
-- You interpret labs and other patient data in complete clinical context
-- You prioritize urgent or high-risk differentials where appropriate
-- You consider the patient's complete medical history in your diagnoses
-
-CLINICAL ANALYSIS FRAMEWORK:
-1. STRUCTURED DATA INTERPRETATION: Analyze all available patient data systematically
-2. DIFFERENTIAL DIAGNOSIS: Consider multiple potential diagnoses with clinical reasoning
-3. RISK STRATIFICATION: Prioritize urgent or high-risk conditions
-4. EVIDENCE-BASED RECOMMENDATIONS: Base conclusions on medical literature and clinical evidence
-5. NEXT STEPS GUIDANCE: Recommend specific diagnostics and follow-up actions
-
-MEDICAL REASONING PROCESS - Follow these steps systematically:
-1. CLINICAL OBSERVATION: What key findings do you observe in the patient data?
-2. CONTEXTUAL ANALYSIS: How do these findings fit within the patient's medical history?
-3. DIFFERENTIAL DIAGNOSIS: What are the potential diagnoses, ranked by likelihood and urgency?
-4. CLINICAL SIGNIFICANCE: What are the immediate and long-term health implications?
-5. EVIDENCE-BASED RECOMMENDATIONS: What specific next steps are medically justified?
-
-RESPONSE REQUIREMENTS:
-- Be detailed and provide thorough breakdowns of each recommendation
-- Always flag any clinical uncertainty and guide on next steps
-- Interpret labs and patient data in complete clinical context
-- Recommend specific next-step diagnostics with medical justification
-- Provide complete information when discussing medications (purpose, dosage, considerations)
-- Define all technical medical terms for clarity
-- Use an expert but supportive human tone
-- Structure answers with headers, bullet points, and clear organization
-
-For the following patient data, provide your systematic medical analysis:
-
-PATIENT DATA TO ANALYZE:
-{extracted_data}
-
-SYSTEMATIC MEDICAL ANALYSIS:
-
-## Clinical Data Review
-[Systematically review and categorize all available patient data]
-
-## Key Clinical Findings
-[Identify the most significant abnormal and normal findings]
-
-## Medical Interpretation & Context
-[Explain what each finding means clinically, considering patient's complete picture]
-
-## Differential Diagnosis
-[List potential diagnoses ranked by likelihood, with supporting evidence]
-- **Primary considerations**: [Most likely diagnoses with reasoning]
-- **Secondary considerations**: [Less likely but important to rule out]
-- **Urgent/High-risk conditions**: [Any conditions requiring immediate attention]
-
-## Clinical Significance Assessment
-[Detailed analysis of health implications and medical urgency]
-
-## Evidence-Based Recommendations
-[Specific, actionable medical recommendations with justification]
-- **Immediate next steps**: [What should be done first]
-- **Diagnostic workup**: [Specific tests recommended with medical rationale]
-- **Monitoring parameters**: [What to watch for]
-- **Follow-up timeline**: [When to reassess]
-
-## Patient Education & Next Steps
-[Clear guidance on what the patient should understand and do]
-
-Provide thorough, evidence-based medical analysis demonstrating systematic clinical thinking."""
-
-FORMATTER_SYSTEM_TEMPLATE = """You are a medical communication specialist who formats clinical analysis into clear, well-structured responses for patients and healthcare consumers.
-
-The analysis includes systematic medical reasoning from a Medical Expert. Preserve this clinical expertise while making it accessible and professionally organized.
-
-MEDICAL FORMATTING REQUIREMENTS:
-1. Start with "## Medical Analysis" or "## Clinical Assessment"
-2. Preserve the systematic medical reasoning and clinical structure
-3. Create clear sections like: Clinical Findings, Medical Interpretation, Differential Diagnosis, Recommendations
-4. Use professional medical formatting with bullet points and clear headers
-5. Maintain clinical accuracy while ensuring readability
-6. Define medical terms when first introduced
-7. Preserve evidence-based recommendations and clinical reasoning
-8. DO NOT include a Sources section - this will be added separately
-
-PRESERVE CLINICAL EXPERTISE:
-- Keep the step-by-step medical analysis visible and organized
-- Make technical medical information accessible to patients
-- Maintain the logical clinical reasoning flow
-- Highlight key medical insights, urgent findings, and actionable recommendations
-- Preserve differential diagnosis reasoning and clinical prioritization
-- Keep medical disclaimers and guidance on seeking professional care
-
-PROFESSIONAL MEDICAL STRUCTURE:
-- Use clear medical headers (Clinical Findings, Assessment, Plan, etc.)
-- Organize recommendations by priority (immediate, short-term, long-term)
-- Clearly distinguish between normal and abnormal findings  
-- Highlight any urgent or concerning findings prominently
-- Structure follow-up recommendations clearly
-
-Take this clinical analysis and format it with professional medical organization while preserving the medical expertise:
-{raw_analysis}
-
-Original user question: {user_question}"""
+def get_source_file(doc, texts, metadatas):
+    """Helper function to get source file name for a document"""
+    for i, text_chunk in enumerate(texts):
+        if text_chunk.page_content == doc.page_content:
+            return metadatas[i].get('source_file', 'Unknown')
+    return 'Unknown'
 
 
 class MultiModelOrchestrator:
     def __init__(self):
         # Model 1: OpenAI for formatting and communication (good at following instructions)
         self.formatter_model = ChatOpenAI(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             temperature=0.1,
-            max_tokens=2000
+            max_tokens=4000
         )
 
         # Model 2: OpenAI for document retrieval (consistent and reliable)
         self.retriever_model = ChatOpenAI(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             temperature=0.0,
-            max_tokens=1500
+            max_tokens=300
         )
 
         # Model 3: LM Studio BioLLM for medical analysis (domain expertise)
@@ -178,49 +63,25 @@ class MultiModelOrchestrator:
             base_url="http://127.0.0.1:1234/v1",
             api_key="lm-studio",
             model="openbiollm-llama3-8b",
-            temperature=0.2,
-            max_tokens=2000
+            temperature=0.1,  # Lower temperature for more focused medical analysis
+            max_tokens=4000   # Increased for comprehensive analysis
         )
 
         # Model 4: OpenAI as conversation router/manager
         self.router_model = ChatOpenAI(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             temperature=0.3,
-            max_tokens=2000
+            max_tokens=4000
         )
 
     async def route_query(self, user_question: str, has_documents: bool = False) -> dict:
-        """Determine how to handle the user's query"""
+        """Determine how to handle the user's query with orchestration awareness"""
 
-        routing_prompt = f"""You are an intelligent routing assistant for a medical AI system. Analyze the user's question and determine the best approach.
-
-User Question: "{user_question}"
-Has Medical Documents: {has_documents}
-
-Determine:
-1. Is this a MEDICAL question that requires specialized biomedical knowledge?
-2. Is this a GENERAL conversation (greetings, thanks, non-medical topics)?
-3. What type of response approach is needed?
-
-Respond with JSON:
-{{
-    "route": "medical" | "general" | "mixed",
-    "reasoning": "brief explanation",
-    "needs_biomed_consult": true/false,
-    "response_type": "conversational" | "analytical" | "informational"
-}}
-
-Examples:
-- "Hello, how are you?" → route: "general", needs_biomed_consult: false
-- "What causes diabetes?" → route: "medical", needs_biomed_consult: true  
-- "Analyze my lab results" → route: "medical", needs_biomed_consult: true
-- "Thank you for the help" → route: "general", needs_biomed_consult: false
-- "Can you explain what hemoglobin does and also tell me about my levels?" → route: "mixed", needs_biomed_consult: true"""
-
+        routing_prompt = generate_routing_prompt(user_question, has_documents)
         try:
             routing_messages = [
                 SystemMessage(
-                    content="You are a smart routing system. Always respond with valid JSON only."),
+                    content="You are a Medical AI Team Orchestrator. Always respond with valid JSON and coordinate team resources efficiently."),
                 HumanMessage(content=routing_prompt)
             ]
 
@@ -229,38 +90,30 @@ Examples:
             # Try to parse the JSON response
             import json
             routing_decision = json.loads(response.content.strip())
-            print(f"🧭 Routing decision: {routing_decision}")
+            print(f"🧭 Team Orchestration: {routing_decision}")
             return routing_decision
 
         except Exception as e:
-            print(f"❌ Routing error: {e}")
+            print(f"❌ Orchestration routing error: {e}")
             # Default to medical route if routing fails
             return {
                 "route": "medical",
-                "reasoning": "routing failed, defaulting to medical",
-                "needs_biomed_consult": True,
-                "response_type": "analytical"
+                "reasoning": "orchestration routing failed, defaulting to medical expert consultation",
+                "needs_medical_expert": True,
+                "needs_document_retrieval": has_documents,
+                "response_type": "clinical_analysis",
+                "orchestration_notes": "fallback to direct medical expert consultation"
             }
 
     async def handle_general_conversation(self, user_question: str) -> str:
-        """Handle non-medical general conversation with OpenAI"""
+        """Handle non-medical general conversation with orchestration awareness"""
 
-        conversation_prompt = f"""You are a friendly, helpful AI assistant for a medical document analysis system. 
-
-Respond to this message in a conversational, helpful way:
-"{user_question}"
-
-Guidelines:
-- Be warm and conversational
-- If asked about your capabilities, mention you can analyze medical documents and answer medical questions
-- Use proper markdown formatting for readability
-- Keep responses concise but friendly
-- If the user seems to be asking something medical, gently suggest they can ask medical questions"""
-
+        conversation_prompt = generate_general_conversation_prompt(
+            user_question)
         try:
             conv_messages = [
                 SystemMessage(
-                    content="You are a friendly, conversational AI assistant. Be helpful and warm in your responses."),
+                    content="You are the friendly communication interface for a Medical AI Team. Be helpful, warm, and represent the team's collaborative capabilities."),
                 HumanMessage(content=conversation_prompt)
             ]
 
@@ -268,8 +121,8 @@ Guidelines:
             return response.content
 
         except Exception as e:
-            print(f"❌ Conversation error: {e}")
-            return "Hello! I'm here to help with medical questions and document analysis. What can I assist you with today?"
+            print(f"❌ Team conversation error: {e}")
+            return "Hello! I'm part of a Medical AI Team here to help with medical questions and document analysis. What can our team assist you with today?"
 
     async def handle_mixed_query(self, user_question: str, retrieved_docs: str = None) -> str:
         """Handle queries that need both conversational flow and medical expertise"""
@@ -284,20 +137,8 @@ Guidelines:
             medical_content = await self.get_medical_insights(user_question)
 
         # Then, have OpenAI create a conversational response incorporating the medical info
-        conversation_prompt = f"""You are a helpful medical AI assistant. The user asked: "{user_question}"
-
-Here is the medical/technical information to incorporate:
-{medical_content}
-
-Create a well-structured, conversational response that:
-1. Directly addresses the user's question
-2. Incorporates the medical information naturally
-3. Uses proper markdown formatting
-4. Is friendly and professional
-5. Includes appropriate medical disclaimers if needed
-
-Make it feel like a natural conversation while being informative."""
-
+        conversation_prompt = generate_mixed_conversation_prompt(
+            user_question, medical_content)
         try:
             conv_messages = [
                 SystemMessage(
@@ -315,71 +156,7 @@ Make it feel like a natural conversation while being informative."""
     async def get_medical_insights(self, user_question: str) -> str:
         """Get medical insights from BioLLM for general medical questions with clinical expertise"""
 
-        medical_prompt = f"""You are a Medical Expert who interprets patient questions, synthesizes medical knowledge, and provides evidence-based clinical guidance.
-
-MEDICAL EXPERTISE FRAMEWORK:
-- Analyze medical questions using comprehensive clinical knowledge
-- Perform systematic medical reasoning and evidence-based analysis
-- Provide detailed explanations with medical justification
-- Consider differential diagnoses and clinical context where appropriate
-- Define technical medical terms for patient understanding
-- Use reputable medical literature to support conclusions
-
-CLINICAL REASONING PROCESS:
-1. QUESTION ANALYSIS: Break down the medical question systematically
-2. MEDICAL FOUNDATION: Explain underlying biological/physiological mechanisms
-3. CLINICAL CONTEXT: Provide relevant clinical background and considerations
-4. DIFFERENTIAL CONSIDERATIONS: Discuss potential causes, conditions, or factors
-5. EVIDENCE-BASED INSIGHTS: Draw from established medical literature and clinical evidence
-6. PRACTICAL GUIDANCE: Provide clear, actionable medical information
-
-USER MEDICAL QUESTION: {user_question}
-
-SYSTEMATIC MEDICAL RESPONSE:
-
-## Medical Question Analysis
-[What specific medical concepts, conditions, or mechanisms are being asked about?]
-
-## Biological & Physiological Foundation
-[Explain the underlying medical/biological processes involved]
-- **Anatomy/Physiology**: [Relevant body systems and normal function]
-- **Pathophysiology**: [How disease processes affect normal function]
-- **Molecular/Cellular level**: [Relevant biological mechanisms]
-
-## Clinical Context & Considerations
-[Provide comprehensive clinical background]
-- **Epidemiology**: [Who is affected, risk factors, prevalence]
-- **Clinical presentation**: [How this typically manifests]
-- **Diagnostic considerations**: [How this is identified/diagnosed]
-
-## Medical Evidence & Literature
-[Reference established medical knowledge]
-- **Current understanding**: [What medical science tells us]
-- **Clinical evidence**: [Supporting research and clinical findings]
-- **Guidelines**: [Relevant medical guidelines or protocols]
-
-## Differential Considerations
-[If applicable, discuss related conditions or alternative explanations]
-
-## Practical Medical Guidance
-[Clear, actionable information for understanding]
-- **Key takeaways**: [Most important points to understand]
-- **When to seek care**: [Red flags or concerning symptoms]
-- **Prevention/Management**: [Relevant preventive or management strategies]
-
-## Medical Terms Glossary
-[Define any technical terms used in simple language]
-
-RESPONSE REQUIREMENTS:
-- Be detailed and provide thorough medical explanations
-- Always flag clinical uncertainty and guide on when to seek professional care
-- Define all technical medical terms clearly
-- Use evidence-based medical information
-- Structure with clear headers and organization
-- Maintain an expert but supportive, educational tone
-- Include appropriate medical disclaimers about seeking professional consultation
-
-Provide comprehensive, evidence-based medical education with systematic clinical reasoning."""
+        medical_prompt = generate_medical_prompt(user_question)
 
         try:
             medical_messages = [
@@ -424,81 +201,31 @@ Provide comprehensive, evidence-based medical education with systematic clinical
 
         # Step 2: Use BioLLM for medical analysis with clinical expertise
         print("🧬 Step 2: Analyzing with Medical Expert (BioLLM)...")
-        analyzer_prompt = f"""You are a Medical Expert who interprets patient data, synthesizes insights, and provides evidence-based medical guidance.
-
-CORE MEDICAL EXPERTISE:
-- Analyze structured patient health record data and provide medical expertise
-- Perform differential diagnoses, treatment planning, and insight generation
-- Interpret labs and patient data in complete clinical context
-- Prioritize urgent or high-risk differentials where appropriate
-- Consider the patient's complete medical history in your diagnoses
-
-USER QUESTION: {user_question}
-
-PATIENT DATA TO ANALYZE:
-{extracted_data}
-
-SYSTEMATIC CLINICAL ANALYSIS:
-
-## Clinical Data Review
-[Systematically review and categorize all available patient data]
-
-## Key Clinical Findings
-[Identify the most significant abnormal and normal findings with clinical context]
-
-## Medical Interpretation & Context
-[Explain what each finding means clinically, considering the complete clinical picture]
-
-## Differential Diagnosis
-[List potential diagnoses ranked by likelihood, with supporting clinical evidence]
-- **Primary considerations**: [Most likely diagnoses with medical reasoning]
-- **Secondary considerations**: [Less likely but clinically important to consider]
-- **Urgent/High-risk conditions**: [Any conditions requiring immediate medical attention]
-
-## Clinical Significance Assessment
-[Detailed analysis of health implications, medical urgency, and patient impact]
-
-## Evidence-Based Recommendations
-[Specific, actionable medical recommendations with clinical justification]
-- **Immediate next steps**: [What should be prioritized medically]
-- **Diagnostic workup**: [Specific tests recommended with medical rationale]
-- **Monitoring parameters**: [Key indicators to track]
-- **Follow-up timeline**: [Appropriate medical follow-up schedule]
-
-## Patient Guidance & Next Steps
-[Clear medical guidance on what should be understood and actions to take]
-
-RESPONSE REQUIREMENTS:
-- Be detailed and provide thorough breakdowns of each clinical recommendation
-- Always flag any clinical uncertainty and guide on appropriate next steps
-- Interpret all data within complete clinical context
-- Recommend specific diagnostics with clear medical justification
-- Define technical medical terms for clarity
-- Use an expert but supportive clinical tone
-- Structure with clear medical organization
-
-Provide comprehensive, evidence-based clinical analysis demonstrating systematic medical expertise."""
-
+        analyzer_prompt = generate_analyzer_prompt(
+            user_question, extracted_data)
         analyzer_messages = [
-            SystemMessage(content="You are a Medical Expert who provides systematic, evidence-based clinical analysis. Always demonstrate professional medical reasoning and comprehensive patient-centered care approach."),
+            SystemMessage(content="You are a Medical Education Expert who provides comprehensive educational analysis of laboratory data for learning purposes. Your role is to demonstrate clinical reasoning, lab interpretation, and medical decision-making processes using provided lab values as educational examples. Always provide detailed educational analysis to help learners understand medical concepts."),
             HumanMessage(content=analyzer_prompt)
         ]
 
         try:
             analysis_response = await self.analyzer_model.ainvoke(analyzer_messages)
             raw_analysis = analysis_response.content
-            print(f"✅ Analysis complete: {raw_analysis[:200]}...")
+            print(f"✅ Initial analysis complete: {raw_analysis[:200]}...")
+
+            # Check if the BioLLM refused to analyze
+            if "cannot generate" in raw_analysis.lower() or "unable to" in raw_analysis.lower() or "sorry" in raw_analysis.lower():
+                print("⚠️ BioLLM refused analysis - using alternative approach")
+                raw_analysis = await self.create_alternative_analysis(extracted_data, user_question)
+            else:
+                # Step 2b: Self-evaluation and enhancement
+                print("🔍 Step 2b: Self-evaluating and enhancing analysis...")
+                raw_analysis = await self.self_evaluate_and_enhance(raw_analysis, extracted_data, user_question)
+
         except Exception as e:
             print(f"❌ Analyzer model error: {e}")
-            # Create a fallback analysis if BioLLM fails
-            try:
-                # Try to create a basic analysis from the extracted data
-                if "lab_results" in extracted_data or "NORMAL LAB" in extracted_data:
-                    raw_analysis = f"Based on the extracted lab data:\n{extracted_data}\n\nBasic analysis: Multiple lab parameters were measured with some values outside normal ranges."
-                else:
-                    raw_analysis = f"Analysis unavailable. Raw data: {extracted_data}"
-            except:
-                raw_analysis = f"Error in analysis. Raw data: {extracted_data}"
+            # Create alternative analysis if BioLLM fails
+            raw_analysis = await self.create_alternative_analysis(extracted_data, user_question)
 
         # Step 3: Use formatter model for final presentation
         print("✨ Step 3: Formatting with OpenAI...")
@@ -520,7 +247,7 @@ Provide comprehensive, evidence-based clinical analysis demonstrating systematic
 
             # Ensure the response has proper structure
             if not final_answer.strip().startswith('##'):
-                final_answer = f"## Lab Results Summary\n\n{final_answer}"
+                final_answer = f"## Medical Analysis\n\n{final_answer}"
 
             # Clean up any extra whitespace or formatting issues
             final_answer = final_answer.strip()
@@ -529,9 +256,78 @@ Provide comprehensive, evidence-based clinical analysis demonstrating systematic
         except Exception as e:
             print(f"❌ Formatter model error: {e}")
             # Create a basic formatted response as fallback
-            final_answer = f"## Lab Results Summary\n\n{raw_analysis}"
+            final_answer = f"## Medical Analysis\n\n{raw_analysis}"
 
         return final_answer
+
+    async def self_evaluate_and_enhance(self, initial_analysis: str, extracted_data: str, user_question: str) -> str:
+        """Self-evaluate the initial analysis and enhance it for comprehensiveness"""
+
+        evaluation_prompt = generate_eval_prompt(
+            user_question, extracted_data, initial_analysis)
+        try:
+            evaluation_messages = [
+                SystemMessage(content="You are a Medical Expert performing rigorous quality assurance and enhancement of medical analysis. Always provide comprehensive, evidence-based medical analysis that exceeds clinical standards."),
+                HumanMessage(content=evaluation_prompt)
+            ]
+
+            enhanced_response = await self.analyzer_model.ainvoke(evaluation_messages)
+            enhanced_analysis = enhanced_response.content
+            print(
+                f"✅ Enhanced analysis complete: {enhanced_analysis[:200]}...")
+
+            # Check if enhancement was successful (longer and more detailed)
+            if len(enhanced_analysis) > len(initial_analysis) * 1.2:  # At least 20% longer
+                return enhanced_analysis
+            else:
+                print("⚠️ Enhancement insufficient - using alternative enhancement")
+                return await self.alternative_enhancement(initial_analysis, extracted_data, user_question)
+
+        except Exception as e:
+            print(f"❌ Self-evaluation error: {e}")
+            return await self.alternative_enhancement(initial_analysis, extracted_data, user_question)
+
+    async def alternative_enhancement(self, initial_analysis: str, extracted_data: str, user_question: str) -> str:
+        """Use OpenAI to enhance the analysis if BioLLM enhancement fails"""
+
+        enhancement_prompt = generate_alt_enhancement_prompt(
+            user_question, extracted_data, initial_analysis)
+
+        try:
+            enhancement_messages = [
+                SystemMessage(
+                    content="You are a Medical Analysis Expert who enhances medical analyses to meet the highest clinical standards. Be thorough, specific, and comprehensive."),
+                HumanMessage(content=enhancement_prompt)
+            ]
+
+            # Use OpenAI for enhancement
+            response = await self.formatter_model.ainvoke(enhancement_messages)
+            return response.content
+
+        except Exception as e:
+            print(f"❌ Alternative enhancement error: {e}")
+            return initial_analysis  # Return original if all enhancement fails
+
+    async def create_alternative_analysis(self, extracted_data: str, user_question: str) -> str:
+        """Create comprehensive analysis using OpenAI when BioLLM refuses"""
+
+        alternative_prompt = generate_alt_analysis_prompt(
+            user_question, extracted_data)
+
+        try:
+            alternative_messages = [
+                SystemMessage(
+                    content="You are a Medical Analysis Assistant providing educational lab interpretation. Be comprehensive and specific in your analysis."),
+                HumanMessage(content=alternative_prompt)
+            ]
+
+            # Use OpenAI formatter model
+            response = await self.formatter_model.ainvoke(alternative_messages)
+            return response.content
+
+        except Exception as e:
+            print(f"❌ Alternative analysis error: {e}")
+            return f"Comprehensive analysis of laboratory data:\n{extracted_data}\n\nDetailed medical interpretation and recommendations would be provided here based on the specific lab values found in the uploaded documents."
 
 
 async def process_uploaded_files():
@@ -619,24 +415,10 @@ orchestrator = MultiModelOrchestrator()
 async def on_chat_start():
     print(f"TRIGGERED: on_chat_start()")
 
-    # Welcome message with options
-    welcome_msg = """Hello! Welcome to your **Multi-Model AI Medical Assistant**! 🤖🧬
-
-I use three specialized AI models:
-- 📄 **Document Retriever**: Extracts data from your PDFs
-- 🧬 **BioMedical Analyzer**: Provides domain expertise  
-- ✨ **Smart Formatter**: Creates beautiful, readable responses
-
-**Choose how you'd like to start:**
-- 📄 **Upload medical documents** for detailed analysis
-- 💬 **Ask me anything** about medical topics (general knowledge)
-
-You can upload documents later by typing 'upload' or using the paperclip icon! 📎"""
-
     elements = [
         # cl.Image(name="image1", display="inline", path="./robot.jpeg")
     ]
-    await cl.Message(content=welcome_msg, elements=elements).send()
+    await cl.Message(content=WELCOME_MSG, elements=elements).send()
 
     # Set initial state - no documents loaded
     cl.user_session.set("documents_loaded", False)
@@ -745,21 +527,79 @@ async def main(message: cl.Message):
         print("📚 Documents available - using document analysis mode")
 
         # Show processing message for document analysis
-        processing_msg = cl.Message(
-            content="🤖 **Multi-Model Processing Pipeline Started...**\n\n🔍 Retrieving relevant documents...")
-        await processing_msg.send()
+        # processing_msg = cl.Message(
+        #     content="🤖 **Multi-Model Processing Pipeline Started...**\n\n🔍 Retrieving relevant documents...")
+        # await processing_msg.send()
+
+        # try yielding
+        msg.content = "🤖 **Multi-Model Processing Pipeline Started...**\n\n🔍 Retrieving relevant documents..."
+        await msg.update()
 
         try:
-            # Step 1: Retrieve relevant documents
-            retriever = vector_store.as_retriever(search_kwargs={"k": 6})
-            docs = await retriever.ainvoke(message.content)
+            # Step 1: Retrieve relevant documents with comprehensive approach
+            print("🔍 Step 1a: Comprehensive document retrieval...")
 
-            # Combine retrieved documents
-            retrieved_text = "\n\n".join([doc.page_content for doc in docs])
+            # First, get documents using similarity search
+            retriever = vector_store.as_retriever(
+                search_kwargs={"k": 15})  # Increased to get more coverage
+            similarity_docs = await retriever.ainvoke(message.content)
+
+            # Second, ensure we have content from ALL uploaded files
+            print("🔍 Step 1b: Ensuring all files are represented...")
+            all_file_sources = set()
+            for metadata in metadatas:
+                all_file_sources.add(metadata['source_file'])
+
+            print(f"📋 Total files uploaded: {len(all_file_sources)}")
+            print(f"📋 Files: {list(all_file_sources)}")
+
+            # Check which files are represented in similarity search
+            similarity_sources = set()
+            for doc in similarity_docs:
+                for i, text_chunk in enumerate(texts):
+                    if text_chunk.page_content == doc.page_content:
+                        source_file = metadatas[i].get(
+                            'source_file', 'Unknown')
+                        similarity_sources.add(source_file)
+                        break
+
+            print(
+                f"📋 Files found in similarity search: {len(similarity_sources)}")
+            print(f"📋 Missing files: {all_file_sources - similarity_sources}")
+
+            # Add documents from missing files to ensure comprehensive coverage
+            comprehensive_docs = list(similarity_docs)
+            missing_files = all_file_sources - similarity_sources
+
+            if missing_files:
+                print(
+                    f"🔍 Step 1c: Adding content from {len(missing_files)} missing files...")
+                for missing_file in missing_files:
+                    # Find representative chunks from missing files
+                    file_docs = []
+                    for i, text_chunk in enumerate(texts):
+                        if metadatas[i].get('source_file') == missing_file:
+                            file_docs.append(text_chunk)
+
+                    # Add the first few chunks from each missing file
+                    # Add up to 3 chunks per missing file
+                    comprehensive_docs.extend(file_docs[:3])
+
+            print(f"📋 Total documents for analysis: {len(comprehensive_docs)}")
+
+            # Combine all retrieved documents with source identification
+            retrieved_text = "\n\n=== DOCUMENT SEPARATOR ===\n\n".join([
+                f"SOURCE FILE: {get_source_file(doc, texts, metadatas)}\n{doc.page_content}"
+                for doc in comprehensive_docs
+            ])
+
+            # # Update processing message
+            # processing_msg.content = f"🤖 **Multi-Model Processing Pipeline Started...**\n\n✅ Documents retrieved from {len(all_file_sources)} files\n🧬 Analyzing with specialized models..."
+            # await processing_msg.update()
 
             # Update processing message
-            processing_msg.content = "🤖 **Multi-Model Processing Pipeline Started...**\n\n✅ Documents retrieved\n🧬 Analyzing with specialized models..."
-            await processing_msg.update()
+            msg.content = f"🤖 **Multi-Model Processing Pipeline Started...**\n\n✅ Documents retrieved from {len(all_file_sources)} files\n🧬 Analyzing with specialized models..."
+            await msg.update()
 
             # Step 2: Use the orchestrator to process the query
             final_response = await orchestrator.process_query(message.content, retrieved_text)
@@ -768,7 +608,7 @@ async def main(message: cl.Message):
             doc_sources = []
             seen_sources = set()  # Track unique source files
 
-            for doc in docs:
+            for doc in comprehensive_docs:
                 # Find the metadata for this document
                 for i, text_chunk in enumerate(texts):
                     if text_chunk.page_content == doc.page_content:
@@ -795,62 +635,94 @@ async def main(message: cl.Message):
 
             # Update processing message to final response (NO source elements)
             print(f"📤 Sending final response WITHOUT source elements to avoid raw text")
-            processing_msg.content = final_response
-            processing_msg.elements = []  # Empty elements to avoid raw text display
-            await processing_msg.update()
+            # processing_msg.content = final_response
+            # processing_msg.elements = []  # Empty elements to avoid raw text display
+            # await processing_msg.update()
+
+            msg.content = final_response
+            msg.elements = []  # Empty elements to avoid raw text display
+            await msg.update()
 
         except Exception as e:
             error_msg = f"❌ **Error in Multi-Model Pipeline**: {str(e)}\n\nPlease make sure all models are accessible."
             print(f"❌ Full error details: {e}")
             await cl.Message(content=error_msg).send()
 
-    # Handle queries without documents using intelligent routing
+    # Handle queries without documents using intelligent team orchestration
     else:
-        print("💬 No documents loaded - using intelligent routing")
+        print("💬 No documents loaded - using intelligent team orchestration")
 
         try:
-            # Step 1: Route the query to determine the best approach
-            processing_msg = cl.Message(
-                content="🧭 **Analyzing your question...**")
-            await processing_msg.send()
+            # # Step 1: Team orchestration - determine approach
+            # processing_msg = cl.Message(
+            #     content="🧭 **Medical AI Team analyzing your question...**")
+            # await processing_msg.send()
+
+            # Step 1: Team orchestration - determine approach
+            msg = cl.Message(
+                content="🧭 **Medical AI Team analyzing your question...**")
+            await msg.send()
 
             routing_decision = await orchestrator.route_query(message.content, has_documents=False)
 
-            # Step 2: Handle based on routing decision
+            # Step 2: Execute team coordination based on orchestration decision
             if routing_decision["route"] == "general":
-                print("📝 Routing to general conversation")
-                processing_msg.content = "💬 **Preparing response...**"
-                await processing_msg.update()
+                print("📝 Team Orchestration: Routing to conversational interface")
+                # processing_msg.content = "💬 **Team preparing response...**"
+                # await processing_msg.update()
+
+                msg.content = "💬 **Team preparing response...**"
+                await msg.update()
 
                 response = await orchestrator.handle_general_conversation(message.content)
 
             elif routing_decision["route"] == "medical":
-                print("🧬 Routing to medical consultation")
-                processing_msg.content = "🧬 **Consulting BioMedical AI...**"
-                await processing_msg.update()
+                print("🧬 Team Orchestration: Consulting Medical Expert")
+                # processing_msg.content = "🧬 **Medical Expert analyzing your question...**"
+                # await processing_msg.update()
 
-                # For pure medical questions, use mixed handler for better conversation flow
+                msg.content = "🧬 **Medical Expert analyzing your question...**"
+                await msg.update()
+
+                # For pure medical questions, coordinate Medical Expert consultation
                 response = await orchestrator.handle_mixed_query(message.content)
 
-            else:  # mixed route
-                print("🔀 Routing to mixed conversation + medical")
-                processing_msg.content = "🧬 **Consulting medical experts...**"
-                await processing_msg.update()
+            else:  # document_analysis or mixed route
+                print("🔀 Team Orchestration: Full team coordination needed")
+                # processing_msg.content = "🤖 **Full Medical AI Team coordination...**"
+                # await processing_msg.update()
+
+                msg.content = "🤖 **Full Medical AI Team coordination...**"
+                await msg.update()
 
                 response = await orchestrator.handle_mixed_query(message.content)
 
-            # Add helpful note about document upload for medical questions
-            if routing_decision.get("needs_biomed_consult", False):
-                response += f"\n\n---\n💡 **Tip**: For analysis of specific lab results or medical documents, attach files to your message or type 'upload'!"
+            # Add team-aware guidance for medical questions
+            if routing_decision.get("needs_medical_expert", False):
+                response += f"\n\n---\n💡 **Team Tip**: Our Medical AI Team can provide detailed analysis of your medical documents. Attach files to your message or type 'upload' for document analysis!"
 
-            # Update the processing message with final response
-            processing_msg.content = response
-            await processing_msg.update()
+            # Stream the team-coordinated response
+            # processing_msg.content = "✅ **Team Response Ready** - Streaming..."
+            # await processing_msg.update()
+
+            msg.content = "✅ **Team Response Ready** - Streaming..."
+            await msg.update()
+
+            # Create streaming response
+            response_msg = cl.Message(content="")
+            await response_msg.send()
+
+            import asyncio
+            for i, char in enumerate(response):
+                response_msg.content += char
+                if i % 25 == 0 or i == len(response) - 1:
+                    await response_msg.update()
+                    await asyncio.sleep(0.02)
 
         except Exception as e:
-            error_msg = f"❌ **Error**: {str(e)}\n\nI'm having trouble processing your request. Please make sure all AI services are running."
+            error_msg = f"❌ **Medical AI Team Error**: {str(e)}\n\nOur team is having trouble processing your request. Please ensure all AI services are running."
             await cl.Message(content=error_msg).send()
-            print(f"Error in intelligent routing: {e}")
+            print(f"Error in team orchestration: {e}")
 
 if __name__ == "__main__":
     print("🚀 Starting Multi-Model Chainlit app...")
