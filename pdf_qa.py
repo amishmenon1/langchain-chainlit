@@ -2,13 +2,7 @@
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain.chains.qa_with_sources.retrieval import RetrievalQAWithSourcesChain
-# Use this instead of community version
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
 from langchain.schema import HumanMessage, SystemMessage
 import os
 import chainlit as cl
