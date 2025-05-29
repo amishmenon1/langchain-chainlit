@@ -265,41 +265,75 @@ def generate_eval_prompt(user_question: str, extracted_data: str, initial_analys
 
 
 def generate_alt_analysis_prompt(user_question: str, extracted_data: str):
-    return f"""You are a Medical Analysis Assistant providing comprehensive laboratory data interpretation for educational and informational purposes.
+    return f"""Analyze this lab report and answer the user’s question.
 
-USER REQUEST: {user_question}
+User Question:
+{user_question}
 
-LABORATORY DATA TO ANALYZE:
+### BEGIN LAB DATA
+Lab Data:
 {extracted_data}
+### END LAB DATA
 
-Provide a comprehensive medical analysis including:
+Your Response:"""
+# def generate_alt_analysis_prompt(user_question: str, extracted_data: str):
+#     return f"""
+# You are a medical analysis expert. Please analyze the following lab results and answer the user's question thoroughly.
 
-## Detailed Lab Value Analysis
-- Analyze each specific lab parameter mentioned
-- Explain clinical significance of abnormal values
-- Provide reference ranges and interpretation
+# ---
 
-## Temporal Trend Analysis  
-- Identify changes in lab values over time
-- Explain clinical significance of trends
-- Assess whether values are improving or worsening
+# ## User Question:
 
-## Clinical Interpretation
-- Explain what abnormal findings might indicate
-- Discuss potential medical conditions suggested by the lab pattern
-- Provide differential diagnosis considerations
+# {user_question}
 
-## Recommendations
-- Suggest appropriate follow-up testing
-- Recommend monitoring parameters
-- Provide general health guidance based on findings
+# ---
 
-## Risk Assessment
-- Identify any urgent or concerning findings
-- Assess overall health status based on lab pattern
-- Highlight values requiring immediate attention
+# ## Lab Results:
 
-Use the specific lab values provided to give detailed, educational medical analysis. Be thorough and specific in your interpretation of each parameter."""
+# {extracted_data}
+
+# ---
+
+# Instructions:
+# - Do not ignore any of the lab values.
+# - Assume the lab data comes from multiple test dates (you may infer trends).
+# - Include abnormal and normal findings.
+# - Create well-structured, patient-friendly output with tables and interpretation.
+
+# Provide a comprehensive analysis:
+# - Medical interpretation
+# - Risks and concerns
+# - Recommendations
+# - Follow-up testing
+
+# Here is an example message structure:
+
+# ## Detailed Lab Value Analysis
+# - Analyze each specific lab parameter mentioned
+# - Explain clinical significance of abnormal values
+# - Provide reference ranges and interpretation
+
+# ## Temporal Trend Analysis
+# - Identify changes in lab values over time
+# - Explain clinical significance of trends
+# - Assess whether values are improving or worsening
+
+# ## Clinical Interpretation
+# - Explain what abnormal findings might indicate
+# - Discuss potential medical conditions suggested by the lab pattern
+# - Provide differential diagnosis considerations
+
+# ## Recommendations
+# - Suggest appropriate follow-up testing
+# - Recommend monitoring parameters
+# - Provide general health guidance based on findings
+
+# ## Risk Assessment
+# - Identify any urgent or concerning findings
+# - Assess overall health status based on lab pattern
+# - Highlight values requiring immediate attention
+
+# Use the specific lab values provided to give detailed, educational medical analysis. Be thorough and specific in your interpretation of each parameter."""
 
 
 def generate_alt_enhancement_prompt(user_question: str, extracted_data: str, initial_analysis: str):

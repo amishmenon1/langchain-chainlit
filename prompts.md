@@ -10,7 +10,7 @@ Please tell me all tests, test results, dates, and notes in the patient reports
 
 Thank you! Please summarize the results of all patient data and audio recordings. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way. After that, please use your medical training and web access to provide your expert medical analysis and insights on the data. Wherever possible, please include references to specific sources, including specific files in your knowledge base.
 
-Please summarize the results of all patient lab data. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way.
+Please explain the results of all patient lab data. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way. Please ensure every lab parameter extracted from the uploaded documents is individually analyzed. Do not summarize multiple panels into one — create distinct tables and analysis sections for each file's lab results.
 
 After that, please use your medical training and web access to provide your expert medical analysis and insights on the data. Wherever possible, please include references to specific sources, including specific files in your knowledge base.
 
