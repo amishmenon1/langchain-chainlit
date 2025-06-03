@@ -1,12 +1,20 @@
-# Prompt 1
+# Prompts to test PDF RAG
+
+### PDF Upload and breakdown
 
 [7 attached PDF files]
 
 Please explain the results of all patient lab data. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way.
 
+Please explain the results of all patient lab data. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way. Please ensure every lab parameter extracted from the uploaded documents is individually analyzed. Do not summarize multiple panels into one — create distinct tables and analysis sections for each file's lab results.
+
+### Follow up convo / routing
+
 Thank you so much. Could you please tell me more about the reported Neutrophils levels, what it means, and what next steps should be taken?
 
-Please explain the results of all patient lab data. Include a breakdown of the normal levels and abnormal levels. Include trends in reported levels across time, and display the data in an organized and intuitive way. Please ensure every lab parameter extracted from the uploaded documents is individually analyzed. Do not summarize multiple panels into one — create distinct tables and analysis sections for each file's lab results.
+### QA WITHOUT upload
+
+Hi, what are your capabilities?
 
 # Response 1 - OpenAI
 
