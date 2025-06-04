@@ -95,7 +95,7 @@ class MultiModelOrchestrator:
 
     async def handle_general_conversation(self, user_question: str) -> str:
         """Handle non-medical general conversation with orchestration awareness"""
-
+        print(f"🧭 Orchestrator - handling general conversation")
         conversation_prompt = generate_general_conversation_prompt(
             user_question)
         try:
@@ -105,8 +105,19 @@ class MultiModelOrchestrator:
                 HumanMessage(content=conversation_prompt)
             ]
 
-            response = await self.router_model.ainvoke(conv_messages)
-            return response.content
+            # response = await self.router_model.ainvoke(conv_messages)
+            # return response.content
+            chainlit_message = await new_message(content="")
+
+            final_answer = ""
+
+            async for chunk in self.router_model.astream(conv_messages):
+                token = chunk.content or ""
+                if final_answer and token:
+                    final_answer += token
+                await chainlit_message.stream_token(token)
+
+            await chainlit_message.update()
 
         except Exception as e:
             print(f"❌ Team conversation error: {e}")
@@ -134,8 +145,21 @@ class MultiModelOrchestrator:
                 HumanMessage(content=conversation_prompt)
             ]
 
-            response = await self.router_model.ainvoke(conv_messages)
-            return response.content
+            # response = await self.router_model.ainvoke(conv_messages)
+            # return response.content
+            # Stream the team-coordinated response
+
+            chainlit_message = await new_message(content="")
+
+            final_answer = ""
+
+            async for chunk in self.formatter_model.astream(conv_messages):
+                token = chunk.content or ""
+                if final_answer and token:
+                    final_answer += token
+                await chainlit_message.stream_token(token)
+
+            await chainlit_message.update()
 
         except Exception as e:
             print(f"❌ Mixed query error: {e}")

@@ -80,6 +80,77 @@ async def load_files_into_db(files) -> Chroma:
     return vector_store
 
 
+async def retrieve_chunks(message_content: str):
+    vector_store = cl.user_session.get("vector_store", None)
+    metadatas = cl.user_session.get("metadatas", [])
+    stored_texts = cl.user_session.get("texts", [])
+    if vector_store:
+        print("🔍 Retrieving documents from vector store")
+        # await update_message(msg=sys_msg_2, content="🔍 Retrieving relevant documents...")
+        retrieve_msg = await new_message(content="🔍 Retrieving relevant documents...")
+        # First, get documents using similarity search
+        retriever = vector_store.as_retriever(
+            search_kwargs={"k": 15, })  # Increased to get more coverage
+
+        similarity_docs = await retriever.ainvoke(message_content)
+
+        # Second, ensure we have content from ALL uploaded files
+        print("🔍 Step 1b: Ensuring all files are represented...")
+        all_file_sources = set()
+        for metadata in metadatas:
+            all_file_sources.add(metadata['source_file'])
+
+        print(f"📋 Total files referenced: {len(all_file_sources)}")
+        print(f"📋 Files: {list(all_file_sources)}")
+
+        # Check which files are represented in similarity search
+        similarity_sources = set()
+        for doc in similarity_docs:
+            for i, text_chunk in enumerate(stored_texts):
+                if text_chunk.page_content == doc.page_content:
+                    source_file = metadatas[i].get(
+                        'source_file', 'Unknown')
+                    similarity_sources.add(source_file)
+                    break
+
+        print(
+            f"📋 Files found in similarity search: {len(similarity_sources)}")
+        print(f"📋 Missing files: {all_file_sources - similarity_sources}")
+
+        # Add documents from missing files to ensure comprehensive coverage
+        comprehensive_docs = list(similarity_docs)
+        missing_files = all_file_sources - similarity_sources
+
+        if missing_files:
+            print(
+                f"🔍 Step 1c: Adding content from {len(missing_files)} missing files...")
+            for missing_file in missing_files:
+                # Find representative chunks from missing files
+                file_docs = []
+                for i, text_chunk in enumerate(stored_texts):
+                    if metadatas[i].get('source_file') == missing_file:
+                        file_docs.append(text_chunk)
+
+                # Add the first few chunks from each missing file
+                # Add up to 3 chunks per missing file
+                comprehensive_docs.extend(file_docs[:3])
+
+        print(f"📋 Total documents for analysis: {len(comprehensive_docs)}")
+
+        # Combine all retrieved documents with source identification
+        retrieved_text = "\n\n=== DOCUMENT SEPARATOR ===\n\n".join([
+            f"SOURCE FILE: {get_source_file(doc, stored_texts, metadatas)}\n{doc.page_content}"
+            for doc in comprehensive_docs
+        ])
+
+        await update_message(msg=retrieve_msg, content=f"✅ Documents retrieved from {len(all_file_sources)} files")
+
+        unique_sources = generate_sources(
+            comprehensive_docs, stored_texts, metadatas)
+
+        return retrieved_text, unique_sources
+
+
 async def prompt_file_upload():
     """Handle file upload and processing"""
     # Ask for file upload

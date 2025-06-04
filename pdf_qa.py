@@ -4,7 +4,7 @@ import chainlit as cl
 
 from dotenv import load_dotenv
 from templates.welcome import WELCOME_MSG
-from utils.file import load_files_into_db, prompt_file_upload, get_source_file, generate_sources
+from utils.file import load_files_into_db, prompt_file_upload, get_source_file, generate_sources, retrieve_chunks
 from utils.message import update_message, new_message
 from orchestrator import MultiModelOrchestrator
 from langchain_community.chat_message_histories import ChatMessageHistory
@@ -63,96 +63,29 @@ async def main(message: cl.Message):
             content="📎 **Files detected!**")
 
         await load_files_into_db(attached_files)
+        # Handle document-based query
+        print("📚 Fetching all docs")
+        # TODO - based on user query, only fetch relevant docs
+        if message.content:
+            try:
+                # sys_msg_2 = await new_message(content="🔄 Analyzing your question...")
+
+                # Step 1: Retrieve relevant documents with comprehensive approach
+                retrieved_text, unique_sources = await retrieve_chunks(
+                    message_content=message.content)
+
+                # Step 2: Use the orchestrator to process the query
+                await orchestrator.process_query(message.content, retrieved_text, unique_sources)
+
+            except Exception as e:
+                error_msg = f"❌ **Error in Multi-Model Pipeline**: {str(e)}\n\nPlease make sure all models are accessible."
+                print(f"❌ Full error details: {e}")
+                await new_message(content=error_msg)
 
     # Check if user wants to upload files via command
     elif message.content.lower().strip() in ['upload', 'upload files', 'add files', 'load documents']:
         await prompt_file_upload()
         return
-
-    sys_msg_2 = await new_message(content="🔄 Analyzing your question...")
-
-    # Get current state
-    documents_loaded = cl.user_session.get("documents_loaded", False)
-    vector_store = cl.user_session.get("vector_store", None)
-    metadatas = cl.user_session.get("metadatas", [])
-    stored_texts = cl.user_session.get("texts", [])
-
-    # Handle document-based queries OR general queries with intelligent routing
-    if documents_loaded and vector_store:
-        # We have documents - use full document analysis pipeline
-        print("📚 Documents available - using document analysis mode")
-
-        try:
-            # Step 1: Retrieve relevant documents with comprehensive approach
-            print("🔍 Retrieving documents from vector store")
-            await update_message(msg=sys_msg_2, content="🔍 Retrieving relevant documents...")
-
-            # First, get documents using similarity search
-            retriever = vector_store.as_retriever(
-                search_kwargs={"k": 15, })  # Increased to get more coverage
-
-            similarity_docs = await retriever.ainvoke(message.content)
-
-            # Second, ensure we have content from ALL uploaded files
-            print("🔍 Step 1b: Ensuring all files are represented...")
-            all_file_sources = set()
-            for metadata in metadatas:
-                all_file_sources.add(metadata['source_file'])
-
-            print(f"📋 Total files referenced: {len(all_file_sources)}")
-            print(f"📋 Files: {list(all_file_sources)}")
-
-            # Check which files are represented in similarity search
-            similarity_sources = set()
-            for doc in similarity_docs:
-                for i, text_chunk in enumerate(stored_texts):
-                    if text_chunk.page_content == doc.page_content:
-                        source_file = metadatas[i].get(
-                            'source_file', 'Unknown')
-                        similarity_sources.add(source_file)
-                        break
-
-            print(
-                f"📋 Files found in similarity search: {len(similarity_sources)}")
-            print(f"📋 Missing files: {all_file_sources - similarity_sources}")
-
-            # Add documents from missing files to ensure comprehensive coverage
-            comprehensive_docs = list(similarity_docs)
-            missing_files = all_file_sources - similarity_sources
-
-            if missing_files:
-                print(
-                    f"🔍 Step 1c: Adding content from {len(missing_files)} missing files...")
-                for missing_file in missing_files:
-                    # Find representative chunks from missing files
-                    file_docs = []
-                    for i, text_chunk in enumerate(stored_texts):
-                        if metadatas[i].get('source_file') == missing_file:
-                            file_docs.append(text_chunk)
-
-                    # Add the first few chunks from each missing file
-                    # Add up to 3 chunks per missing file
-                    comprehensive_docs.extend(file_docs[:3])
-
-            print(f"📋 Total documents for analysis: {len(comprehensive_docs)}")
-
-            # Combine all retrieved documents with source identification
-            retrieved_text = "\n\n=== DOCUMENT SEPARATOR ===\n\n".join([
-                f"SOURCE FILE: {get_source_file(doc, stored_texts, metadatas)}\n{doc.page_content}"
-                for doc in comprehensive_docs
-            ])
-
-            await update_message(msg=sys_msg_2, content=f"✅ Documents retrieved from {len(all_file_sources)} files")
-
-            unique_sources = generate_sources(
-                comprehensive_docs, stored_texts, metadatas)
-            # Step 2: Use the orchestrator to process the query
-            await orchestrator.process_query(message.content, retrieved_text, unique_sources)
-
-        except Exception as e:
-            error_msg = f"❌ **Error in Multi-Model Pipeline**: {str(e)}\n\nPlease make sure all models are accessible."
-            print(f"❌ Full error details: {e}")
-            await cl.Message(content=error_msg).send()
 
     # Handle queries without documents using intelligent team orchestration
     else:
@@ -160,56 +93,40 @@ async def main(message: cl.Message):
 
         try:
             # Step 1: Team orchestration - determine approach
-            msg = cl.Message(
-                content="🧭 **Medical AI Team analyzing your question...**")
-            await msg.send()
-
             routing_decision = await orchestrator.route_query(message.content, has_documents=False)
 
             # Step 2: Execute team coordination based on orchestration decision
             if routing_decision["route"] == "general":
                 print("📝 Team Orchestration: Routing to conversational interface")
-
-                msg.content = "💬 **Team preparing response...**"
-                await msg.update()
-
                 response = await orchestrator.handle_general_conversation(message.content)
 
             elif routing_decision["route"] == "medical":
                 print("🧬 Team Orchestration: Consulting Medical Expert")
-                msg.content = "🧬 **Medical models analyzing your question...**"
-                await msg.update()
-
+                med_msg = await new_message("🧬 **Medical models analyzing your question...**")
                 # For pure medical questions, coordinate Medical Expert consultation
                 response = await orchestrator.handle_mixed_query(message.content)
 
             else:  # document_analysis or mixed route
                 print("🔀 Team Orchestration: Full team coordination needed")
-
-                msg.content = "🤖 **Full Medical AI Team coordination...**"
-                await msg.update()
-
                 response = await orchestrator.handle_mixed_query(message.content)
 
             # Add team-aware guidance for medical questions
             if routing_decision.get("needs_medical_expert", False):
                 response += f"\n\n---\n💡 **Team Tip**: Our Medical AI Team can provide detailed analysis of your medical documents. Attach files to your message or type 'upload' for document analysis!"
 
-            # Stream the team-coordinated response
-            msg.content = "✅ **Team Response Ready** - Streaming..."
-            await msg.update()
+            # await update_message(msg=msg, content="✅ **Team Response Ready** - Streaming...")
 
-            # Create streaming response
-            response_msg = cl.Message(content="")
-            await response_msg.send()
+            # # Create streaming response
+            # response_msg = cl.Message(content="")
+            # await response_msg.send()
 
-            for i, char in enumerate(response):
-                await response_msg.stream_token(char)
-                # response_msg.content += char
-                # if i % 25 == 0 or i == len(response) - 1:
-                #     await response_msg.update()
-                #     await asyncio.sleep(0.02)
-            await response_msg.update()
+            # for i, char in enumerate(response):
+            #     await response_msg.stream_token(char)
+            #     # response_msg.content += char
+            #     # if i % 25 == 0 or i == len(response) - 1:
+            #     #     await response_msg.update()
+            #     #     await asyncio.sleep(0.02)
+            # await response_msg.update()
 
         except Exception as e:
             error_msg = f"❌ **Medical AI Team Error**: {str(e)}\n\nOur team is having trouble processing your request. Please ensure all AI services are running."
