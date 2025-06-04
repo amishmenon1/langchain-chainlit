@@ -2,6 +2,7 @@ langchain
 langchain-community
 langchain-unstructured
 langchain-openai
+langchain-chroma
 openai
 chainlit
 chromadb

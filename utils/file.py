@@ -3,6 +3,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from utils.message import new_message, update_message
 
 CHROMA_PATH = 'chroma'
 
@@ -15,9 +16,8 @@ text_splitter = RecursiveCharacterTextSplitter(
 async def load_files_into_db(files) -> Chroma:
     # Process the attached files
     file_names = [f.name for f in files]
-    # msg = cl.Message(
-    #     content=f"🔄 Processing {len(files)} attached file(s): {', '.join(file_names)}...")
-    # await msg.send()
+
+    file_upload_msg = await new_message(content=f"🔄 Processing {len(files)} attached file(s): {', '.join(file_names)}...")
 
     # Process all attached files
     all_pdf_pages = []
@@ -39,7 +39,7 @@ async def load_files_into_db(files) -> Chroma:
 
         except Exception as e:
             print(f"Error processing {file.name}: {str(e)}")
-            await cl.Message(content=f"❌ Error processing {file.name}: {str(e)}").send()
+            await new_message(content=f"❌ Error processing {file.name}: {str(e)}")
 
     if all_pdf_pages:
         # Split the text into chunks
@@ -62,23 +62,22 @@ async def load_files_into_db(files) -> Chroma:
             })
 
         # Store everything in user session (merge with existing if any)
-        existing_texts = cl.user_session.get("texts", [])
+        existing_chunks = cl.user_session.get("texts", [])
         existing_metadatas = cl.user_session.get("metadatas", [])
 
         cl.user_session.set("vector_store", vector_store)
         cl.user_session.set("metadatas", existing_metadatas + metadatas)
-        cl.user_session.set("texts", existing_texts + all_doc_chunks)
+        cl.user_session.set("texts", existing_chunks + all_doc_chunks)
         cl.user_session.set("documents_loaded", True)
 
         # Success message
         processed_files_list = ", ".join(processed_filenames)
-        # msg.content = f"✅ **Processing Complete!** \nLoaded **{len(processed_filenames)}** attached file(s): {processed_files_list}\n🔄 Now analyzing your question..."
-        # await msg.update()
-    else:
-        processed_files_list = []
-        # await cl.Message(content="❌ No files were successfully processed from attachments.").send()
+        await update_message(msg=file_upload_msg, content=f"✅ **Processing Complete!** \nLoaded **{len(processed_filenames)}** attached file(s): {processed_files_list}")
 
-    return processed_files_list
+    else:
+        await update_message(msg=file_upload_msg, content="❌ No files were successfully processed from attachments.")
+
+    return vector_store
 
 
 async def prompt_file_upload():

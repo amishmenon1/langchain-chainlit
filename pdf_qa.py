@@ -62,27 +62,20 @@ async def main(message: cl.Message):
         sys_msg_1 = await new_message(
             content="📎 **Files detected!**")
 
-        sys_msg_2 = await new_message(
-            content=f"🔄 Processing {len(attached_files)} attached file(s)")
-
-        processed_files = await load_files_into_db(attached_files)
-
-        if len(processed_files) > 0:
-            await update_message(msg=sys_msg_2, content=f"✅ **Processing Complete!** \nLoaded **{len(processed_files)}** attached file(s): {processed_files}")
-            sys_msg_3 = await new_message(content="4. 🔄 Now analyzing your question...")
-        else:
-            await cl.Message(content="❌ No files were successfully processed from attachments.").send()
+        await load_files_into_db(attached_files)
 
     # Check if user wants to upload files via command
     elif message.content.lower().strip() in ['upload', 'upload files', 'add files', 'load documents']:
         await prompt_file_upload()
         return
 
+    sys_msg_2 = await new_message(content="🔄 Analyzing your question...")
+
     # Get current state
     documents_loaded = cl.user_session.get("documents_loaded", False)
-    vector_store = cl.user_session.get("vector_store")
+    vector_store = cl.user_session.get("vector_store", None)
     metadatas = cl.user_session.get("metadatas", [])
-    texts = cl.user_session.get("texts", [])
+    stored_texts = cl.user_session.get("texts", [])
 
     # Handle document-based queries OR general queries with intelligent routing
     if documents_loaded and vector_store:
@@ -91,12 +84,13 @@ async def main(message: cl.Message):
 
         try:
             # Step 1: Retrieve relevant documents with comprehensive approach
-            print("🔍 Step 1a: Comprehensive document retrieval...")
-            await update_message(msg=sys_msg_3, content="🔍 Retrieving relevant documents...")
+            print("🔍 Retrieving documents from vector store")
+            await update_message(msg=sys_msg_2, content="🔍 Retrieving relevant documents...")
 
             # First, get documents using similarity search
             retriever = vector_store.as_retriever(
                 search_kwargs={"k": 15, })  # Increased to get more coverage
+
             similarity_docs = await retriever.ainvoke(message.content)
 
             # Second, ensure we have content from ALL uploaded files
@@ -111,7 +105,7 @@ async def main(message: cl.Message):
             # Check which files are represented in similarity search
             similarity_sources = set()
             for doc in similarity_docs:
-                for i, text_chunk in enumerate(texts):
+                for i, text_chunk in enumerate(stored_texts):
                     if text_chunk.page_content == doc.page_content:
                         source_file = metadatas[i].get(
                             'source_file', 'Unknown')
@@ -132,7 +126,7 @@ async def main(message: cl.Message):
                 for missing_file in missing_files:
                     # Find representative chunks from missing files
                     file_docs = []
-                    for i, text_chunk in enumerate(texts):
+                    for i, text_chunk in enumerate(stored_texts):
                         if metadatas[i].get('source_file') == missing_file:
                             file_docs.append(text_chunk)
 
@@ -144,27 +138,16 @@ async def main(message: cl.Message):
 
             # Combine all retrieved documents with source identification
             retrieved_text = "\n\n=== DOCUMENT SEPARATOR ===\n\n".join([
-                f"SOURCE FILE: {get_source_file(doc, texts, metadatas)}\n{doc.page_content}"
+                f"SOURCE FILE: {get_source_file(doc, stored_texts, metadatas)}\n{doc.page_content}"
                 for doc in comprehensive_docs
             ])
 
-            sys_msg_4 = await new_message(content=f"✅ Documents retrieved from {len(all_file_sources)} files")
+            await update_message(msg=sys_msg_2, content=f"✅ Documents retrieved from {len(all_file_sources)} files")
 
             unique_sources = generate_sources(
-                comprehensive_docs, texts, metadatas)
+                comprehensive_docs, stored_texts, metadatas)
             # Step 2: Use the orchestrator to process the query
-            # final_response = await orchestrator.process_query(message.content, retrieved_text, unique_sources)
-            final_response = await orchestrator.process_query(message.content, retrieved_text, unique_sources, sys_msg_3)
-
-            print(f"✅ Final response length: {len(final_response)} characters")
-
-            # Update processing message to final response (NO source elements)
-            print(f"📤 Sending final response WITHOUT source elements to avoid raw text")
-            final_response_msg = await cl.Message(content=final_response).send()
-            final_response_msg.elements = []
-            # processor_msg.content = final_response
-            # processor_msg.elements = []  # Empty elements to avoid raw text display
-            await final_response_msg.update()
+            await orchestrator.process_query(message.content, retrieved_text, unique_sources)
 
         except Exception as e:
             error_msg = f"❌ **Error in Multi-Model Pipeline**: {str(e)}\n\nPlease make sure all models are accessible."

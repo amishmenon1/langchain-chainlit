@@ -35,20 +35,28 @@ class MultiModelOrchestrator:
         # )
 
         # # Model 3: OpenBioLLM-70B
+        # self.analyzer_model = ChatOpenAI(
+        #     # Replace with your actual RunPod endpoint
+        #     base_url="https://smu0tfnzayidsv-8000.proxy.runpod.net/v1",
+        #     api_key="runpod-70b",  # Fake key; required by LangChain for compatibility
+        #     model="aaditya/Llama3-OpenBioLLM-70B",
+        #     temperature=0.1,
+        #     max_tokens=4096,  # Adjust according to RunPod’s limit
+        #     # streaming=True
+        # )
+
+        # # Model 3: OpenAI as medical analyzer (temporary)
         self.analyzer_model = ChatOpenAI(
-            # Replace with your actual RunPod endpoint
-            base_url="https://smu0tfnzayidsv-8000.proxy.runpod.net/v1",
-            api_key="runpod-70b",  # Fake key; required by LangChain for compatibility
-            model="aaditya/Llama3-OpenBioLLM-70B",
-            temperature=0.1,
-            max_tokens=4096,  # Adjust according to RunPod’s limit
-            # streaming=True
+            model="gpt-4o-mini",
+            temperature=0.3,
+            max_tokens=4000,
+            streaming=True
         )
 
         # Model 4: OpenAI as conversation router/manager
         self.router_model = ChatOpenAI(
             model="gpt-4o-mini",
-            temperature=0.3,
+            temperature=0.5,
             max_tokens=4000,
             streaming=True
         )
@@ -133,6 +141,7 @@ class MultiModelOrchestrator:
             print(f"❌ Mixed query error: {e}")
             return medical_content  # Fallback to just medical content
 
+    # @cl.step(name="Medical Insights", show_input=False)
     async def get_medical_insights(self, user_question: str) -> str:
         """Get medical insights from OpenBioLLM for general medical questions with clinical expertise"""
 
@@ -151,11 +160,54 @@ class MultiModelOrchestrator:
             print(f"❌ Medical insights error: {e}")
             return f"I encountered an issue accessing medical information. Please ensure the BioLLM is running."
 
-    async def process_query(self, user_question: str, retrieved_docs: str, unique_sources: list, sys_msg: cl.Message) -> str:
+    async def format_and_stream(self, user_question: str, analysis: str, sources: list = []):
+        formatter_prompt = FORMATTER_SYSTEM_TEMPLATE.format(
+            raw_analysis=analysis,
+            user_question=user_question
+        )
+
+        formatter_messages = [
+            SystemMessage(
+                content="You are a medical formatter. Structure this analysis with rich formatting, tables, sections, and patient-facing clarity."),
+            HumanMessage(
+                content=formatter_prompt)
+        ]
+
+        try:
+            chainlit_message = await new_message(content="")
+
+            final_answer = ""
+
+            async for chunk in self.formatter_model.astream(formatter_messages):
+                token = chunk.content or ""
+                if final_answer and token:
+                    final_answer += token
+                await chainlit_message.stream_token(token)
+
+            await chainlit_message.update()
+
+            # Add properly formatted sources to the response (unique files only)
+
+            if sources:
+                sources_section = f"\n\n## Sources\n" + \
+                    "\n".join([f"- {source}" for source in sources])
+                for source in sources_section:
+                    await chainlit_message.stream_token(source)
+            await chainlit_message.update()
+
+            print(
+                f"✅ Final formatted output ready (length={len(final_answer)})")
+
+        except Exception as e:
+            print(f"❌ Formatter error: {e}")
+
+        return final_answer
+
+    async def process_query(self, user_question: str, retrieved_docs: str, unique_sources: list) -> str:
         """Improved document analysis pipeline"""
 
         # Step 1: Use retriever model to extract structured lab data
-        print("🔍 Step 1: Extracting structured data from documents...")
+        # print("🔍 Step 1: Extracting structured data from documents...")
         # sys_msg_5 = await new_message(content="🔍 Checking database for relevant documents...")
 
         # retriever_prompt = RETRIEVER_SYSTEM_TEMPLATE.format(
@@ -196,17 +248,13 @@ class MultiModelOrchestrator:
         # Add this to double-check actual prompt length (token-wise if needed)
         print(
             f"🧠 Final analyzer prompt length: {len(analyzer_prompt)} characters")
-        print(analyzer_prompt[:1000])  # Preview safely
+        print(analyzer_prompt[:2000])  # Preview safely
 
         try:
             analysis_response = await self.analyzer_model.ainvoke(analyzer_messages)
             raw_analysis = analysis_response.content.strip()
 
-            # chainlit_message = await cl.Message(content="✅ Initial medical analysis complete. Evaluating response for enhancements...\n", author="Analyzer").send()
-            # await chainlit_message.update()
-            # sys_msg.content = "✅ Initial medical analysis complete. Evaluating response for enhancements..."
-            # await sys_msg.update()
-            await update_message(msg=sys_msg_6, content="✅ Initial medical analysis complete. Evaluating response for enhancements...")
+            await update_message(msg=sys_msg_6, content="✅ Initial medical analysis complete. Evaluating response...")
             print(f"✅ Initial BioLLM analysis (length={len(raw_analysis)})")
 
             # Quality filter - check for insufficient or hallucinated output
@@ -222,16 +270,9 @@ class MultiModelOrchestrator:
                 raw_analysis = await self.create_alternative_analysis(retrieved_docs, user_question)
             else:
                 # Attempt enhancement ONLY if initial is decent
+                print("🔍 Enhancing analysis...")
 
-                print("🔍 Enhancing analysis with self-evaluation...")
-
-                # chainlit_message = await cl.Message(content="🔍 Evaluating response for enhancements... \n\n", author="Formatter").send()
-                # await chainlit_message.update()
-
-                # sys_msg.content = "🔍 Evaluating response for enhancements..."
-                # await sys_msg.update()
-
-                await update_message(msg=sys_msg_6, content="🔍 Evaluating response for enhancements...")
+                await update_message(msg=sys_msg_6, content="🔍 Evaluating response...")
 
                 enhanced_analysis = await self.self_evaluate_and_enhance(
                     raw_analysis, retrieved_docs, user_question
@@ -244,12 +285,6 @@ class MultiModelOrchestrator:
                 else:
                     print("⚠️ Enhancement not significantly better — skipping")
 
-            # chainlit_message = await cl.Message(content="✅ Evaluation complete. \n\n", author="Formatter").send()
-            # await chainlit_message.update()
-
-                # sys_msg.content = "✅ Evaluation complete!"
-                # await sys_msg.update()
-
                 await update_message(msg=sys_msg_6, content="✅ Evaluation complete!")
 
         except Exception as e:
@@ -258,59 +293,9 @@ class MultiModelOrchestrator:
 
         # Step 3: Format final response
         print("✨ Step 3: Formatting with OpenAI formatter...")
-        # chainlit_message = await cl.Message(content="Generating response... \n\n", author="Formatter").send()
-        # chainlit_message.content = "Generating response... \n\n"
-        # await chainlit_message.update()
-        # sys_msg.content = "✅ Analysis complete!"
-        # await sys_msg.update()
 
         await update_message(msg=sys_msg_6, content="✅ Analysis complete!")
-
-        formatter_prompt = FORMATTER_SYSTEM_TEMPLATE.format(
-            raw_analysis=raw_analysis,
-            user_question=user_question
-        )
-
-        formatter_messages = [
-            SystemMessage(
-                content="You are a medical formatter. Structure this analysis with rich formatting, tables, sections, and patient-facing clarity."),
-            HumanMessage(
-                content=formatter_prompt)
-        ]
-
-        try:
-            # formatted_response = await self.formatter_model.ainvoke(formatter_messages)
-            # final_answer = formatted_response.content.strip()
-            # chainlit_message = await cl.Message(content="", author="Formatter").send()
-            chainlit_message = await new_message(content="")
-
-            final_answer = ""
-
-            async for chunk in self.formatter_model.astream(formatter_messages):
-                token = chunk.content or ""
-                if final_answer and token:
-                    final_answer += token
-                await chainlit_message.stream_token(token)
-
-            await chainlit_message.update()
-
-            # Add properly formatted sources to the response (unique files only)
-
-            if unique_sources:
-                sources_section = f"\n\n## Sources\n" + \
-                    "\n".join([f"- {source}" for source in unique_sources])
-                for source in sources_section:
-                    await chainlit_message.stream_token(source)
-            await chainlit_message.update()
-
-            print(
-                f"✅ Final formatted output ready (length={len(final_answer)})")
-
-        except Exception as e:
-            print(f"❌ Formatter error: {e}")
-            # final_answer = f"## Comprehensive Medical Analysis\n\n{raw_analysis}"
-
-        return final_answer
+        return await self.format_and_stream(user_question=user_question, analysis=raw_analysis, sources=unique_sources)
 
     async def self_evaluate_and_enhance(self, initial_analysis: str, extracted_data: str, user_question: str) -> str:
         """Self-evaluate the initial analysis and enhance it for comprehensiveness"""

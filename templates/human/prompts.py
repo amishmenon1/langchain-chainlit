@@ -6,9 +6,6 @@ Your team consists of:
 2. Medical Expert (BioLLM) - Performs clinical analysis and generates medical insights  
 3. Communication Formatter (OpenAI) - Creates clear, patient-friendly responses
 
-User Question: "{user_question}"
-Has Medical Documents: {has_documents}
-
 As the orchestrator, determine:
 1. Is this a MEDICAL question requiring clinical expertise?
 2. Is this GENERAL conversation (greetings, thanks, non-medical topics)?
@@ -30,7 +27,13 @@ Examples:
 - "Hello, how are you?" → route: "general", needs_medical_expert: false
 - "What causes diabetes?" → route: "medical", needs_medical_expert: true  
 - "Analyze my lab results" → route: "document_analysis", needs_medical_expert: true, needs_document_retrieval: true
-- "Thank you for the analysis" → route: "general", needs_medical_expert: false"""
+- "Thank you for the analysis" → route: "general", needs_medical_expert: false
+
+
+User Question: "{user_question}"
+Has Medical Documents: "{has_documents}"
+
+"""
 
 
 def generate_general_conversation_prompt(user_question: str):
