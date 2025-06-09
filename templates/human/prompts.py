@@ -1,39 +1,52 @@
 def generate_routing_prompt(user_question: str, has_documents: bool = False):
-    return f"""You are an intelligent Medical AI Team Orchestrator that coordinates specialized AI models for healthcare analysis.
+    return f"""You are a Medical AI Router that intelligently directs healthcare queries to specialized AI components.
 
-Your team consists of:
-1. Document Retriever (OpenAI) - Extracts and structures data from medical files
-2. Medical Expert (BioLLM) - Performs clinical analysis and generates medical insights  
-3. Communication Formatter (OpenAI) - Creates clear, patient-friendly responses
+    ROUTING DECISION FRAMEWORK:
+    Analyze the user's query and determine the optimal processing path based on medical relevance, data requirements, and response complexity.
 
-As the orchestrator, determine:
-1. Is this a MEDICAL question requiring clinical expertise?
-2. Is this GENERAL conversation (greetings, thanks, non-medical topics)?
-3. What team coordination approach is needed?
+    ROUTE CATEGORIES:
+    1. **MEDICAL_WITH_DATA**: Clinical questions requiring patient data analysis
+    - Lab result interpretation, trend analysis, diagnostic workup
+    - Requires: Document retrieval + Medical analysis + Clinical formatting
 
-Your core mission is to understand, analyze, and provide actionable guidance about patient health using structured medical records and clinical intelligence.
+    2. **MEDICAL_GENERAL**: Medical questions not requiring specific patient data  
+    - General health information, condition explanations, medical education
+    - Requires: Medical analysis + Conversational formatting
 
-Respond with JSON:
-{{
-    "route": "medical" | "general" | "document_analysis",
-    "reasoning": "brief explanation of orchestration approach",
-    "needs_medical_expert": true/false,
-    "needs_document_retrieval": true/false,
-    "response_type": "conversational" | "clinical_analysis" | "informational",
-    "orchestration_notes": "how to coordinate the team for this query"
-}}
+    3. **GENERAL**: Non-medical conversation
+    - Greetings, thanks, general chat, non-health topics
+    - Requires: Direct response only
 
-Examples:
-- "Hello, how are you?" → route: "general", needs_medical_expert: false
-- "What causes diabetes?" → route: "medical", needs_medical_expert: true  
-- "Analyze my lab results" → route: "document_analysis", needs_medical_expert: true, needs_document_retrieval: true
-- "Thank you for the analysis" → route: "general", needs_medical_expert: false
+    DECISION CRITERIA:
+    - Does the query mention specific medical tests, results, or patient data? → MEDICAL_WITH_DATA
+    - Does the query ask about medical conditions, symptoms, or health topics? → MEDICAL_GENERAL  
+    - Does the query lack any medical/health context? → GENERAL
 
+    SAFETY GUARDRAILS:
+    - Emergency keywords (chest pain, difficulty breathing, severe symptoms) → Flag for immediate medical attention
+    - Prescription requests → Redirect to healthcare provider
+    - Diagnostic certainty requests → Emphasize professional consultation needed
 
-User Question: "{user_question}"
-Has Medical Documents: "{has_documents}"
+    Respond with JSON:
+    {{
+        "route": "medical_with_data" | "medical_general" | "general",
+        "confidence": 0.0-1.0,
+        "reasoning": "Clear explanation of routing decision",
+        "safety_flags": ["emergency", "prescription", "diagnosis"] or [],
+        "data_requirements": {{
+            "needs_retrieval": true/false,
+            "retrieval_focus": "recent_labs" | "specific_test" | "temporal_trends" | null,
+            "urgency": "high" | "medium" | "low"
+        }},
+        "response_guidance": {{
+            "tone": "clinical" | "educational" | "conversational",
+            "depth": "comprehensive" | "moderate" | "brief",
+            "format": "clinical_analysis" | "educational" | "chat"
+        }}
+    }}
 
-"""
+    User Question: "{user_question}"
+    Has Medical Documents: {has_documents}"""
 
 
 def generate_general_conversation_prompt(user_question: str):
@@ -267,76 +280,99 @@ def generate_eval_prompt(user_question: str, extracted_data: str, initial_analys
   Provide the most comprehensive, thorough medical analysis possible - this should be significantly more detailed than the initial analysis."""
 
 
-def generate_alt_analysis_prompt(user_question: str, extracted_data: str):
-    return f"""Analyze this lab report and answer the user’s question.
+ANALYZER_SYSTEM_TEMPLATE = """You are a Clinical Medical Expert providing evidence-based analysis of patient health data.
 
-User Question:
-{user_question}
+CLINICAL EXPERTISE SCOPE:
+- Interpret laboratory results in complete clinical context
+- Provide differential diagnosis with clinical reasoning
+- Assess medical urgency and risk stratification  
+- Recommend evidence-based next steps and monitoring
+- Explain medical concepts clearly while maintaining clinical accuracy
 
-### BEGIN LAB DATA
-Lab Data:
+ANALYSIS METHODOLOGY:
+1. **Data Review**: Systematically examine all provided patient data
+2. **Clinical Correlation**: Interpret findings within broader health context
+3. **Risk Assessment**: Identify urgent, concerning, or reassuring patterns
+4. **Evidence-Based Reasoning**: Apply medical literature and clinical guidelines
+5. **Actionable Guidance**: Provide specific, justified recommendations
+
+RESPONSE FRAMEWORK - Adapt based on query complexity:
+
+**For Comprehensive Analysis** (complex multi-system queries):
+- Complete systematic review of all data
+- Detailed differential diagnosis
+- Comprehensive risk assessment
+- Full diagnostic workup recommendations
+
+**For Focused Analysis** (specific test or concern):
+- Targeted interpretation of relevant findings
+- Focused differential for the specific concern
+- Relevant recommendations for the query
+
+**For Educational Queries** (general medical information):
+- Clear medical explanations
+- Evidence-based information
+- Practical patient guidance
+
+CRITICAL REQUIREMENTS:
+- Always include specific numerical values and ranges when discussing results
+- Explain medical terminology clearly
+- Indicate when professional consultation is essential
+- Distinguish between normal variations and pathological findings
+- Provide time-sensitive guidance for urgent concerns
+
+SAFETY GUARDRAILS:
+- Never provide definitive diagnoses (suggest "possible" or "concerning for")
+- Always recommend professional medical consultation for significant findings
+- Flag any results suggesting urgent medical attention
+- Emphasize limitations of analysis without physical examination
+
+Medical Query to Analyze: {user_question}
+Available Patient Data: {extracted_data}
+"""
+
+
+def generate_analysis_prompt(user_question: str, extracted_data: str, route_guidance: dict = {
+    'data_requirements': {'urgency': 'medium'},
+    'response_guidance': {'depth': 'moderate'}
+}):
+    urgency = route_guidance.get(
+        'data_requirements', {}).get('urgency', 'medium')
+    depth = route_guidance.get(
+        'response_guidance', {}).get('depth', 'moderate')
+
+    urgency_instruction = {
+        'high': "Focus on urgent findings and immediate clinical concerns. Prioritize time-sensitive recommendations.",
+        'medium': "Provide balanced analysis addressing the user's specific question with appropriate clinical depth.",
+        'low': "Focus on educational aspects while addressing the specific query."
+    }
+
+    depth_instruction = {
+        'comprehensive': "Provide detailed systematic analysis following the complete clinical framework.",
+        'moderate': "Focus on the specific query while including relevant clinical context.",
+        'brief': "Provide focused response to the specific question with essential clinical information."
+    }
+
+    return f"""Based on the patient data provided, analyze and respond to the user's specific question.
+
+**Analysis Guidance**:
+- {urgency_instruction[urgency]}
+- {depth_instruction[depth]}
+
+**User's Specific Question**: {user_question}
+
+**Clinical Analysis Instructions**:
+1. Address the user's specific question directly
+2. Interpret relevant lab values in clinical context
+3. Highlight any concerning or reassuring findings
+4. Provide evidence-based guidance appropriate to the query
+5. Recommend next steps relevant to the user's concern
+
+**Patient Data**:
 {extracted_data}
-### END LAB DATA
 
-Your Response:"""
-# def generate_alt_analysis_prompt(user_question: str, extracted_data: str):
-#     return f"""
-# You are a medical analysis expert. Please analyze the following lab results and answer the user's question thoroughly.
-
-# ---
-
-# ## User Question:
-
-# {user_question}
-
-# ---
-
-# ## Lab Results:
-
-# {extracted_data}
-
-# ---
-
-# Instructions:
-# - Do not ignore any of the lab values.
-# - Assume the lab data comes from multiple test dates (you may infer trends).
-# - Include abnormal and normal findings.
-# - Create well-structured, patient-friendly output with tables and interpretation.
-
-# Provide a comprehensive analysis:
-# - Medical interpretation
-# - Risks and concerns
-# - Recommendations
-# - Follow-up testing
-
-# Here is an example message structure:
-
-# ## Detailed Lab Value Analysis
-# - Analyze each specific lab parameter mentioned
-# - Explain clinical significance of abnormal values
-# - Provide reference ranges and interpretation
-
-# ## Temporal Trend Analysis
-# - Identify changes in lab values over time
-# - Explain clinical significance of trends
-# - Assess whether values are improving or worsening
-
-# ## Clinical Interpretation
-# - Explain what abnormal findings might indicate
-# - Discuss potential medical conditions suggested by the lab pattern
-# - Provide differential diagnosis considerations
-
-# ## Recommendations
-# - Suggest appropriate follow-up testing
-# - Recommend monitoring parameters
-# - Provide general health guidance based on findings
-
-# ## Risk Assessment
-# - Identify any urgent or concerning findings
-# - Assess overall health status based on lab pattern
-# - Highlight values requiring immediate attention
-
-# Use the specific lab values provided to give detailed, educational medical analysis. Be thorough and specific in your interpretation of each parameter."""
+Provide your clinical analysis addressing the user's specific question:
+"""
 
 
 def generate_alt_enhancement_prompt(user_question: str, extracted_data: str, initial_analysis: str):
@@ -361,3 +397,18 @@ Your task is to significantly enhance this analysis by:
 7. **Comprehensive Risk Assessment**: Provide detailed clinical risk stratification
 
 Provide a significantly enhanced, comprehensive medical analysis that addresses these improvements while maintaining all the good elements of the initial analysis."""
+
+
+def generate_retrieval_prompt(user_question: str):
+    return f"""Extract and structure medical data specifically relevant to this query:
+
+    **User Question**: {user_question}
+
+    **Extraction Focus**: 
+    - Prioritize data directly related to the user's question
+    - Include supporting contextual information
+    - Highlight any abnormal or concerning values
+    - Show temporal trends if multiple dates available
+
+    **Response Structure**: Follow the systematic format in your system template, emphasizing data most relevant to answering the user's specific question.
+    """

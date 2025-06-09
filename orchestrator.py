@@ -4,7 +4,7 @@ import chainlit as cl
 import json
 from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
 from templates.system.formatter import FORMATTER_SYSTEM_TEMPLATE
-from templates.human.prompts import generate_routing_prompt, generate_general_conversation_prompt, generate_mixed_conversation_prompt, generate_medical_prompt, generate_analyzer_prompt, generate_eval_prompt, generate_alt_analysis_prompt, generate_alt_enhancement_prompt
+from templates.human.prompts import generate_routing_prompt, generate_general_conversation_prompt, generate_mixed_conversation_prompt, generate_medical_prompt, generate_analyzer_prompt, generate_eval_prompt, generate_analysis_prompt, generate_alt_enhancement_prompt
 from utils.message import update_message, new_message
 
 
@@ -261,7 +261,7 @@ class MultiModelOrchestrator:
         print("🧬 Step 2: Running BioLLM medical analysis...")
         sys_msg_6 = await new_message(content="🧬 Performing medical analysis...")
 
-        analyzer_prompt = generate_alt_analysis_prompt(
+        analyzer_prompt = generate_analysis_prompt(
             user_question, retrieved_docs)
 
         analyzer_messages = [
@@ -372,7 +372,7 @@ class MultiModelOrchestrator:
     async def create_alternative_analysis(self, extracted_data: str, user_question: str) -> str:
         """Create comprehensive analysis using OpenAI when BioLLM refuses"""
 
-        alternative_prompt = generate_alt_analysis_prompt(
+        alternative_prompt = generate_analysis_prompt(
             user_question, extracted_data)
 
         try:
