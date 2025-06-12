@@ -11,3 +11,5 @@ PyPDF2
 pypdf
 pandas
 tabulate
+google-adk
+langgraph
