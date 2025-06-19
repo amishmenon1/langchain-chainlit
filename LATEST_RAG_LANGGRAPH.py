@@ -1,6 +1,12 @@
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk, SystemMessage
 from langchain.schema.runnable import Runnable
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
 from langchain.schema import StrOutputParser, Document
 from langchain.schema.runnable.config import RunnableConfig
 from typing import cast, Annotated, List, Optional, Any
@@ -14,8 +20,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RAG_CLASSIFIER_PROMPT_TEMPLATE
-from langchain.prompts import ChatPromptTemplate
+from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RAG_CLASSIFIER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE, FORMATTER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_TEMPLATE
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
 from typing_extensions import TypedDict
@@ -25,12 +31,19 @@ text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000, chunk_overlap=200, add_start_index=True
 )
 CHROMA_PATH = 'chroma'
-# Define the function that calls the model
+
+chat_history = []
 
 
 class UserMessageState(MessagesState):
     document_context: Any
-    # clusters: Annotated[List[List[dict]], operator.add]
+    retrieved_docs: List[Any]
+    analysis: SystemMessage
+    is_medical_question: bool
+
+
+def format_docs(docs: List[Document]):
+    return "\n\n".join(doc.page_content for doc in docs)
 
 
 async def load_files_into_vectordb(files=[]):
@@ -46,7 +59,7 @@ async def load_files_into_vectordb(files=[]):
             try:
                 loader = PyPDFLoader(file.path)
                 pdf_pages = []
-                async for page in loader.alazy_load():
+                for page in loader.lazy_load():
                     page.metadata['source_file'] = file.name
                     pdf_pages.append(page)
 
@@ -77,7 +90,7 @@ async def load_files_into_vectordb(files=[]):
 
 @cl.on_chat_start
 async def on_chat_start():
-    default_llm = ChatOpenAI(model="gpt-4o-mini")
+    default_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     msg_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
     rag_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
     rag_llm = ChatOpenAI(model="gpt-4o-mini")
@@ -92,7 +105,6 @@ async def on_chat_start():
     def classify_message(state: UserMessageState):
         print(f"classify_message()")
         message = state["messages"][-1]
-        # sys_prompt = MSG_CLASSIFIER_PROMPT_TEMPLATE.format(message=message)
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -104,84 +116,114 @@ async def on_chat_start():
         )
         llm = prompt | msg_classifier_llm
         response = llm.invoke({"message": message})
-        # print(f"classifier response: {response}")
-        if "is_medical_question" in response.content:
+        is_med_question = response.content
+
+        if is_med_question:
             print(f"User is asking a medical question")
-            return "is_medical_question"
+            return True
+
         else:
             print(f"User is asking a general question")
-            return "is_general_question"
+            return False
 
     # node 1a - RAG node
-    def retrieve_docs(state: UserMessageState):
-        # def format_docs(docs: List[Document]):
-        #     return "\n\n".join(doc.page_content for doc in docs)
 
+    def retrieve_docs(state: UserMessageState):
         print(f"retrieve_docs()")
         message = state["messages"][-1]
         rag_chain = cl.user_session.get("rag_chain", None)
         if rag_chain:
             rag_chain = cast(Runnable, rag_chain)
-            document_context = cl.user_session.get("extracted_data", [])
-            # print(f"retrieved docs: {document_context[:200]}")
-            rag_results = rag_chain.invoke(
-                {"question": message, "context": document_context},
+            retrieved_docs = cl.user_session.get("extracted_data", [])
+
+            rag_result = rag_chain.invoke(
+                {"message": message,
+                    "context": format_docs(retrieved_docs)},
                 config=RunnableConfig(
                     callbacks=[cl.LangchainCallbackHandler()]),
             )
-            print(f"rag results\n\n: {rag_results[:200]}\n\n")
+            print(f"rag results\n\n: {rag_result.content[:200]}\n\n")
         return {
-            "document_context": rag_results
+            "document_context": rag_result.content,
+            "retrieved_docs": retrieved_docs,
+            "messages": [SystemMessage(content=rag_result.content)]
         }
 
     # node 2a - researcher node
 
     def web_search(state: UserMessageState):
         print(f"web_search()")
-        # print(f"state: {state}")
-        document_context = state["document_context"]
-        # print(f"document_context: {document_context[:500]}")
         # TODO implement method using pub med and web search tools
         return state
 
     # node 3a - analyzer node
-    def analyze(state: MessagesState):
+
+    def analyze(state: UserMessageState):
         print(f"analyze()")
-        # TODO implement method using analysis_llm + memory + docs + tool results
-        return state
-        # response = analysis_llm.invoke(state["messages"])
-        # return {"messages": response}
+        message = state["messages"][-1]
+        document_context = state["document_context"]
+        retrieved_docs = state["retrieved_docs"]
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    MEDICAL_ANALYSIS_PROMPT_TEMPLATE,
+                ),
+                ("human", "{message}"),
+            ]
+        )
+        llm = prompt | analysis_llm
+        response = llm.invoke(
+            {"message": message, "context": format_docs(retrieved_docs), }
+            # {"message": message, "context": document_context, }
+        )
+
+        return {"messages": [SystemMessage(content=response.content)]}
 
     # node 1b - default generator node
-    def generate(state: MessagesState):
+    def generate(state: UserMessageState):
         print(f"generate()")
-        # TODO implement method using formatter_llm + latest messages
-        return state
-        # response = formatter_llm.invoke(state["messages"])
-        # return {"messages": response}
+        # analysis = state.get("analysis", None)
+        analysis = state["messages"][-1]
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    FORMATTER_PROMPT_TEMPLATE,
+                ),
+                # ("human", "{message}"),
+            ]
+        )
+        # llm = prompt | formatter_llm
+        llm = formatter_llm  # | StrOutputParser()
+        response = llm.invoke(
+            analysis.content)
 
-    # node 4 - formatter node
-    def format_and_respond(state: MessagesState):
-        print(f"format_and_respond()")
-        response = formatter_llm.invoke(state["messages"])
-        return {"messages": response}
+        print(f"all messages: {state["messages"]}")
 
-    # Define the (single) node in the graph
-    # workflow.add_node("classify_message", classify_message)
-    # workflow.add_node("rag_router", rag_router)
+        return {"messages": [AIMessage(content=response.content)]}
+
+    # workflow.add_node("load_docs", load_docs)  # comment if broken
     workflow.add_node("retrieve_docs", retrieve_docs)
     workflow.add_node("web_search", web_search)
     workflow.add_node("analyze", analyze)
     workflow.add_node("generate", generate)
-    # workflow.add_node("format_and_respond", format_and_respond)
 
-    # workflow.add_edge(START, "route_message")
+    # comment if broken and replace below load_docs with START
+    # workflow.add_edge(START, "load_docs")
+
+    # workflow.add_conditional_edges("load_docs", classify_message, {
+    #     # If medical question, use RAG and medical analysis
+    #     True: "retrieve_docs",
+    #     # Otherwise use general model completion
+    #     False: "generate",
+    # })
+
     workflow.add_conditional_edges(START, classify_message, {
         # If medical question, use RAG and medical analysis
-        # "is_medical_question": "rag_router",
-        "is_medical_question": "retrieve_docs",
+        True: "retrieve_docs",
         # Otherwise use general model completion
-        "is_general_question": "generate",
+        False: "generate",
     })
 
     workflow.add_edge("retrieve_docs", "web_search")
@@ -195,15 +237,26 @@ async def on_chat_start():
     cl.user_session.set("app", app)
 
     # setup RAG chain
-    rag_prompt = prompts.pull("rlm/rag-prompt")
-    rag_chain: Runnable = rag_prompt | rag_llm | StrOutputParser()
+    # TODO - change this rag_prompt
+    # extract all patient data - test names, test results,
+    # rag_prompt = prompts.pull("rlm/rag-prompt")
+
+    rag_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                RETRIEVER_SYSTEM_TEMPLATE,
+            ),
+            ("human", "{message}"),
+        ]
+    )
+
+    rag_chain: Runnable = rag_prompt | rag_llm  # | StrOutputParser()
     cl.user_session.set("rag_chain", rag_chain)
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    input_messages = [HumanMessage(message.content)]
-
     # Check if files are attached to this message
     attached_files = None
     if hasattr(message, 'elements') and message.elements:
@@ -212,23 +265,42 @@ async def on_message(message: cl.Message):
             elem, 'path') and elem.path.endswith('.pdf')]
         print(f"📎 Found {len(attached_files)} attached files")
 
+    cl.user_session.set("latest_attached_files", attached_files)
     # If files are attached, process them first
     if attached_files:
+        chat_history.append(SystemMessage(
+            content=f"Attachments: {len(attached_files)}"))
         sys_msg_1 = await new_message(
             content="📎 **Files detected!**")
         await load_files_into_vectordb(attached_files)
+    else:
+        chat_history.append(SystemMessage(
+            content=f"Attachments: {0}"))
 
-    config = {"configurable": {"thread_id": "abc123"}}
+    chat_history.append(HumanMessage(content=message.content))
+
     app = cast(Runnable, cl.user_session.get("app"))
-    msg = cl.Message(content="")
-    for chunk in app.stream(
-        {"messages": input_messages},
+
+    answer = cl.Message(content="")
+    await answer.send()
+
+    config: RunnableConfig = {
+        "configurable": {"thread_id": cl.context.session.thread_id}
+    }
+
+    for msg, metadata in app.stream(
+        {"messages": chat_history},
         config,
-        # highlight-next-line
         stream_mode="messages",
     ):
-        if isinstance(chunk, AIMessage):  # Filter to just model responses
-            # print(chunk.content, end="|")
-            await msg.stream_token(chunk.content)
-
-    await msg.send()
+        print(f"streamed msg: {msg}")
+        print(f"streamed metadata: {metadata}")
+        is_not_bool = str(msg.content).strip().lower() not in ["true", "false"]
+        # if isinstance(msg, AIMessageChunk) and is_not_bool:
+        if (
+            msg.content
+            and not isinstance(msg, HumanMessage)
+            and metadata["langgraph_node"] == "generate"
+        ):
+            answer.content += msg.content  # type: ignore
+            await answer.update()

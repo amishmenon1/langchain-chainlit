@@ -4,6 +4,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utils.message import new_message, update_message
+from typing import cast
 
 CHROMA_PATH = 'chroma'
 
@@ -62,14 +63,15 @@ async def load_files_into_db(files) -> Chroma:
             })
 
         # Store everything in user session (merge with existing if any)
-        existing_chunks = cl.user_session.get("texts", [])
+        existing_chunks = cl.user_session.get("extracted_data", [])
         existing_metadatas = cl.user_session.get("metadatas", [])
 
         cl.user_session.set("vector_store", vector_store)
         cl.user_session.set("metadatas", existing_metadatas + metadatas)
-        cl.user_session.set("texts", existing_chunks + all_doc_chunks)
+        # cl.user_session.set("texts", existing_chunks + all_doc_chunks)
+        cl.user_session.set("extracted_data", existing_chunks + all_doc_chunks)
         cl.user_session.set("documents_loaded", True)
-
+        # print(f"all doc chunks: {all_doc_chunks}")
         # Success message
         processed_files_list = ", ".join(processed_filenames)
         await update_message(msg=file_upload_msg, content=f"✅ **Processing Complete!** \nLoaded **{len(processed_filenames)}** attached file(s): {processed_files_list}")
@@ -81,9 +83,9 @@ async def load_files_into_db(files) -> Chroma:
 
 
 async def retrieve_chunks(message_content: str):
-    vector_store = cl.user_session.get("vector_store", None)
+    vector_store = cast(Chroma, cl.user_session.get("vector_store", None))
     metadatas = cl.user_session.get("metadatas", [])
-    stored_texts = cl.user_session.get("texts", [])
+    stored_texts = cl.user_session.get("extracted_data", [])
     if vector_store:
         print("🔍 Retrieving documents from vector store")
         # await update_message(msg=sys_msg_2, content="🔍 Retrieving relevant documents...")

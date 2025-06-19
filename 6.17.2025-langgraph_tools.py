@@ -1,68 +1,257 @@
 import os
 import uuid
+import logging
 
 from langgraph.checkpoint.memory import MemorySaver
-from typing import Annotated, Sequence
-from langchain_openai import ChatOpenAI
+from typing import Annotated, Sequence, Literal
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, AIMessageChunk
-from typing_extensions import TypedDict
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain.tools.retriever import create_retriever_tool
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessageChunk
+from langchain.schema.runnable import Runnable
+from langchain.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
 import chainlit as cl
 from dotenv import load_dotenv
 from langsmith import Client
 import langsmith
 from typing import cast
-from langchain.schema.runnable import Runnable
+from chainlit import make_async
+from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Access API keys from environment variables
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants
+CHROMA_PATH = "./chroma_data"
 
 # Configure LangSmith
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_PROJECT"] = "Chainlit-RAG-Assistant"
 
+# Langchain models and tools
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+embedding_model = OpenAIEmbeddings()
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000, chunk_overlap=200)
+memory = MemorySaver()
+
 
 class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
+### VECTOR STORE LOADER ###
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-### TOOLS SETUP ###
-tool = TavilySearchResults(max_results=10)
-tools = [tool]
-llm_with_tools = llm.bind_tools(tools)
+async def load_files_into_vectordb(files=[]):
+    logger.info("Starting to load files into vector DB")
+    all_pdf_pages = []
+    processed_filenames = []
+
+    for file in files:
+        try:
+            logger.info(f"Loading: {file.name}")
+            loader = PyPDFLoader(file.path)
+            pdf_pages = []
+            for page in loader.lazy_load():
+                page.metadata['source_file'] = file.name
+                pdf_pages.append(page)
+
+            all_pdf_pages.extend(pdf_pages)
+            processed_filenames.append(file.name)
+            logger.info(
+                f"Successfully processed {file.name} ({len(pdf_pages)} pages)")
+
+        except Exception as e:
+            logger.error(f"Error processing {file.name}: {e}")
+
+    if not all_pdf_pages:
+        raise ValueError("No PDF pages to embed")
+
+    chunks = text_splitter.split_documents(all_pdf_pages)
+    logger.info(f"Split into {len(chunks)} chunks")
+
+    vectordb = Chroma.from_documents(
+        documents=chunks,
+        embedding=embedding_model,
+        persist_directory=CHROMA_PATH
+    )
+    logger.info("Vector DB successfully created and persisted")
+    return vectordb
+
+### DYNAMIC RETRIEVER TOOL ###
+
+
+def get_pdf_retriever_tool():
+    vectordb = cl.user_session.get("vectordb")
+    if not vectordb:
+        logger.warning("No vector DB found in session")
+        return None
+
+    retriever = vectordb.as_retriever()
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                RETRIEVER_SYSTEM_TEMPLATE,
+            ),
+
+        ]
+    )
+    return create_retriever_tool(
+        retriever,
+        name="pdf_retriever",
+        description="Retrieve information from uploaded PDF documents.",
+        document_prompt=prompt
+    )
+
+### GRAPH NODES ###
+
+
+def generate_query_or_respond(state: State):
+    logger.info("Generating query or response with tools")
+    retriever_tool = get_pdf_retriever_tool()
+    logger.info(f"retriever tool: {retriever_tool}")
+    tools = [retriever_tool] if retriever_tool else []
+
+    response = llm.bind_tools(tools).invoke(state["messages"])
+    logger.info(f"LLM response generated: {response.content}")
+    return {"messages": [response]}
+
+
+class GradeDocuments(BaseModel):
+    binary_score: str = Field(description="'yes' if relevant, 'no' otherwise")
+
+
+GRADE_PROMPT = """You are a grader assessing document relevance.\nDocument:\n{context}\n\nUser question:\n{question}\n\nIs this document relevant? Respond only with 'yes' or 'no'.\n"""
+
+
+def grade_documents(state: State) -> Literal["generate_answer", "chatbot"]:
+    logger.info("Grading document relevance")
+
+    # Get the original user question (first human message)
+    user_messages = [msg for msg in state["messages"]
+                     if isinstance(msg, HumanMessage)]
+    if not user_messages:
+        logger.warning("No user message found for grading")
+        return "chatbot"
+
+    # Extract the actual question from the user message
+    # Remove the file upload context we added in Solution 1
+    question = user_messages[-1].content
+    if "Please use the pdf_retriever tool to answer my question:" in question:
+        question = question.split(
+            "Please use the pdf_retriever tool to answer my question:")[-1].strip()
+    elif "I have uploaded the following PDF file(s):" in question:
+        # Extract just the question part
+        parts = question.split("I have uploaded the following PDF file(s):")
+        if len(parts) > 1 and ":" in parts[1]:
+            question = parts[1].split(":", 1)[-1].strip()
+
+    logger.info(f"Extracted question for grading: {question}")
+
+    # Look for ToolMessage in the state - this contains the retrieved documents
+    from langchain_core.messages import ToolMessage
+    tool_messages = [msg for msg in state["messages"]
+                     if isinstance(msg, ToolMessage)]
+
+    if not tool_messages:
+        logger.warning("No tool messages found for grading")
+        return "chatbot"
+
+    # Get the content from the most recent tool message (retrieved documents)
+    context = tool_messages[-1].content
+
+    if not context:
+        logger.warning("No retrieved document content found for grading")
+        return "chatbot"
+
+    logger.info(f"Grading with question: {question[:100]}...")
+    logger.info(f"Grading with context: {context[:1000]}...")
+
+    prompt = GRADE_PROMPT.format(question=question, context=context)
+
+    response = llm.with_structured_output(GradeDocuments).invoke(
+        [{"role": "user", "content": prompt}]
+    )
+
+    logger.info(f"Grading result: {response.binary_score}")
+    return "generate_answer" if response.binary_score == "yes" else "chatbot"
+
+
+ANSWER_PROMPT = """Use the following context to answer the question.\nIf the answer is not contained, say you don't know.\n\nQuestion: {question}\nContext: {context}\nAnswer:"""
+
+
+def generate_answer(state: State):
+    logger.info("Generating final answer")
+    question = state["messages"][0].content
+    context = state["messages"][-1].content
+    prompt = ANSWER_PROMPT.format(question=question, context=context)
+
+    response = llm.invoke([{"role": "user", "content": prompt}])
+    return {"messages": [response]}
 
 
 def chatbot(state: State):
+    logger.info("Running fallback chatbot node")
     return {"messages": [llm.invoke(state["messages"])]}
 
+### REBUILDABLE GRAPH ###
 
-graph_builder = StateGraph(State)
-memory = MemorySaver()
-graph_builder.add_node("chatbot", chatbot)
 
-### ADD TOOL NODE WITH TOOL CONDITION ###
+def rebuild_graph():
+    logger.info("Rebuilding graph dynamically")
+    graph_builder = StateGraph(State)
+    graph_builder.add_node("generate_query_or_respond",
+                           generate_query_or_respond)
+    graph_builder.add_node("generate_answer", generate_answer)
+    graph_builder.add_node("chatbot", chatbot)
 
-tool_node = ToolNode(tools=[tool])
-graph_builder.add_node("tools", tool_node)
+    retriever_tool = get_pdf_retriever_tool()
+    if retriever_tool:
+        logger.info("Including PDF retriever node")
+        graph_builder.add_node("pdf_retrieve", ToolNode([retriever_tool]))
 
-graph_builder.add_conditional_edges(
-    "chatbot",
-    tools_condition,
-)
-graph_builder.add_edge("tools", "chatbot")
+    graph_builder.add_edge(START, "generate_query_or_respond")
+    graph_builder.add_conditional_edges(
+        "generate_query_or_respond",
+        tools_condition,
+        {
+            "tools": "pdf_retrieve" if retriever_tool else "chatbot",
+            END: END,
+        },
+    )
 
-graph_builder.add_edge(START, "chatbot")
+    if retriever_tool:
+        graph_builder.add_conditional_edges(
+            "pdf_retrieve",
+            grade_documents,
+            {
+                "generate_answer": "generate_answer",
+                "chatbot": "chatbot",
+            },
+        )
+        graph_builder.add_edge("generate_answer", END)
+        graph_builder.add_edge("chatbot", END)
+    else:
+        graph_builder.add_edge("chatbot", END)
 
-graph = graph_builder.compile(checkpointer=memory)
+    graph = graph_builder.compile(checkpointer=memory)
+    cl.user_session.set("graph", graph)
+    logger.info("Graph compiled and saved to session")
+
+### CHAINLIT HOOKS ###
 
 
 @cl.on_chat_start
@@ -78,17 +267,13 @@ async def start():
             }
         }
     }
-    checkpoint = memory.get(config)
-    if checkpoint and "messages" in checkpoint:
-        cl.user_session.set("messages", checkpoint["messages"])
-    else:
-        cl.user_session.set("messages", [])
-    cl.user_session.set("graph", graph)
+    checkpoint = memory.get(config) or {}
+    cl.user_session.set("messages", checkpoint.get("messages", []))
+    rebuild_graph()
 
 
 @cl.on_message
 async def main(message: cl.Message):
-    graph = cast(Runnable, cl.user_session.get("graph"))
     thread_id = cl.user_session.get("thread_id")
     config = {
         "configurable": {
@@ -101,19 +286,47 @@ async def main(message: cl.Message):
         }
     }
 
-    # Retrieve the existing messages from the session
-    existing_messages = cast(list, cl.user_session.get("messages", []))
+    pdf_files = [
+        elem for elem in message.elements or []
+        if hasattr(elem, "path") and elem.path.endswith(".pdf")
+    ]
 
-    # Append the new user message
-    existing_messages.append(HumanMessage(content=message.content))
+    # Prepare the message content
+    user_message_content = message.content
+
+    if pdf_files:
+        cl.user_session.set("latest_attached_files", pdf_files)
+        await cl.Message(content=f"📎 **Detected {len(pdf_files)} PDF file(s). Loading...**").send()
+
+        try:
+            vectordb = await load_files_into_vectordb(pdf_files)
+            cl.user_session.set("vectordb", vectordb)
+            await cl.Message(content="✅ **PDFs successfully embedded. Answering your question...**").send()
+            await make_async(rebuild_graph)()
+
+            # Modify the message to include context about uploaded files
+            file_names = [f.name for f in pdf_files]
+            user_message_content = f"I have uploaded the following PDF file(s): {', '.join(file_names)}. Please use the pdf_retriever tool to answer my question: {message.content}"
+
+        except Exception as e:
+            await cl.Message(content=f"❌ Failed to embed PDF: {str(e)}").send()
+            return
+
+    # Get graph and run full message flow
+    graph = cast(Runnable, cl.user_session.get("graph"))
+    existing_messages = cast(list, cl.user_session.get("messages", []))
+    existing_messages.append(HumanMessage(content=user_message_content))
 
     answer = cl.Message(content="")
     await answer.send()
+
     for msg, _ in graph.stream(
         {"messages": existing_messages},
         config,
         stream_mode="messages",
     ):
         if isinstance(msg, AIMessageChunk):
-            answer.content += msg.content  # type: ignore
+            answer.content += msg.content
             await answer.update()
+
+    cl.user_session.set("messages", existing_messages)

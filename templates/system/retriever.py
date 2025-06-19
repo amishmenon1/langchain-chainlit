@@ -36,7 +36,7 @@ EXTRACTION RULES:
 3. Maintain medical terminology accuracy
 4. Include context that affects interpretation
 5. Note any concerning patterns or clusters of abnormalities
-
-User Query Context: {user_question}
-Available Documents: {summaries}
 """
+
+# User Query Context: {user_question}
+# Available Documents: {summaries}
