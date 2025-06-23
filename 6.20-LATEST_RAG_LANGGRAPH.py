@@ -36,6 +36,14 @@ CHROMA_PATH = 'chroma'
 
 chat_history = []
 
+default_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+msg_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
+rag_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
+rag_llm = ChatOpenAI(model="gpt-4o-mini")
+research_llm = ChatOpenAI(model="gpt-4o-mini")
+analysis_llm = ChatOpenAI(model="gpt-4o-mini")
+formatter_llm = ChatOpenAI(model="gpt-4o-mini")
+
 
 class UserMessageState(MessagesState):
     document_context: Any
@@ -92,13 +100,6 @@ async def load_files_into_vectordb(files=[]):
 
 @cl.on_chat_start
 async def on_chat_start():
-    default_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    msg_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
-    rag_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
-    rag_llm = ChatOpenAI(model="gpt-4o-mini")
-    research_llm = ChatOpenAI(model="gpt-4o-mini")
-    analysis_llm = ChatOpenAI(model="gpt-4o-mini")
-    formatter_llm = ChatOpenAI(model="gpt-4o-mini")
 
     # Define a new graph
     workflow = StateGraph(state_schema=MessagesState)

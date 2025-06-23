@@ -5,6 +5,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utils.message import new_message, update_message
 from typing import cast
+from langchain.prompts import ChatPromptTemplate
+from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
 
 CHROMA_PATH = 'chroma'
 
@@ -89,10 +91,11 @@ async def retrieve_chunks(message_content: str):
     if vector_store:
         print("🔍 Retrieving documents from vector store")
         # await update_message(msg=sys_msg_2, content="🔍 Retrieving relevant documents...")
+        print(f"NEW retrieve msg")
         retrieve_msg = await new_message(content="🔍 Retrieving relevant documents...")
         # First, get documents using similarity search
         retriever = vector_store.as_retriever(
-            search_kwargs={"k": 15, })  # Increased to get more coverage
+            search_kwargs={"k": 5, })  # Increased to get more coverage
 
         similarity_docs = await retriever.ainvoke(message_content)
 
@@ -144,7 +147,7 @@ async def retrieve_chunks(message_content: str):
             f"SOURCE FILE: {get_source_file(doc, stored_texts, metadatas)}\n{doc.page_content}"
             for doc in comprehensive_docs
         ])
-
+        print(f"updating retrieve msg")
         await update_message(msg=retrieve_msg, content=f"✅ Documents retrieved from {len(all_file_sources)} files")
 
         unique_sources = generate_sources(
