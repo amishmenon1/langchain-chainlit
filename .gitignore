@@ -163,4 +163,5 @@ cython_debug/
 .dockerignore
 .files
 chroma
+chroma_data
 .DS_Store

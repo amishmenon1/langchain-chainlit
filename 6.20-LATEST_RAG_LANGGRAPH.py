@@ -147,15 +147,7 @@ async def on_chat_start():
             ]
         )
 
-        # prompt = ChatPromptTemplate.from_template("""Answer the following question based only on the provided context:
-        #     <context>
-        #     {context}
-        #     </context>
-        #     Question: {input}""")
         chain = prompt | rag_llm | StrOutputParser()
-        answer = cl.Message(content="")
-        final_answer = ""
-
         response = chain.invoke(
             {"input": message.content, "context": retrieved_text})
         # print(f"retreived docs response: {response}")
@@ -219,21 +211,10 @@ async def on_chat_start():
 
         return {"messages": [AIMessage(content=response)]}
 
-    # workflow.add_node("load_docs", load_docs)  # comment if broken
     workflow.add_node("retrieve_docs", retrieve_docs)
     workflow.add_node("web_search", web_search)
     workflow.add_node("analyze", analyze)
     workflow.add_node("generate", generate)
-
-    # comment if broken and replace below load_docs with START
-    # workflow.add_edge(START, "load_docs")
-
-    # workflow.add_conditional_edges("load_docs", classify_message, {
-    #     # If medical question, use RAG and medical analysis
-    #     True: "retrieve_docs",
-    #     # Otherwise use general model completion
-    #     False: "generate",
-    # })
 
     workflow.add_conditional_edges(START, classify_message, {
         # If medical question, use RAG and medical analysis
@@ -270,7 +251,6 @@ async def on_message(message: cl.Message):
             content=f"Attachments: {len(attached_files)}"))
         sys_msg_1 = await new_message(
             content="📎 **Files detected!**")
-        # await load_files_into_vectordb(attached_files)
         await load_files_into_db(attached_files)
     else:
         chat_history.append(SystemMessage(
@@ -280,20 +260,20 @@ async def on_message(message: cl.Message):
 
     app = cast(Runnable, cl.user_session.get("app"))
 
+    answer = cl.Message(content="")
     config: RunnableConfig = {
         "configurable": {"thread_id": cl.context.session.thread_id}
     }
-    answer = cl.Message(content="")
+    # cb = cl.LangchainCallbackHandler()
     # await answer.send()
     async for msg, metadata in app.astream(
         {"messages": chat_history},
+        # the below line causes this console error:
+        # `2025-06-23 19:05:34 - Error in callback coroutine: TracerException('No indexed run ID 7421f269-ebfc-4806-ac28-21423c5f65bf.')`
+        # config=RunnableConfig(callbacks=[cb], **config),
         config,
         stream_mode="messages",
     ):
-        # print(f"streamed msg: {msg}")
-        # print(f"streamed metadata: {metadata}")
-        is_not_bool = str(msg.content).strip().lower() not in ["true", "false"]
-        # if isinstance(msg, AIMessageChunk) and is_not_bool:
         if (
             msg.content
             and isinstance(msg, AIMessage)
@@ -301,3 +281,5 @@ async def on_message(message: cl.Message):
         ):
             answer.content += msg.content  # type: ignore
             await answer.stream_token(msg.content)
+
+    await answer.update()

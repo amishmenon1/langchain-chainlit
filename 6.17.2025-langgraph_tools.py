@@ -24,7 +24,6 @@ from langsmith import Client
 import langsmith
 from typing import cast
 from chainlit import make_async
-from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
 
 # Load environment variables from .env file
 load_dotenv()
@@ -100,20 +99,10 @@ def get_pdf_retriever_tool():
         return None
 
     retriever = vectordb.as_retriever()
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                RETRIEVER_SYSTEM_TEMPLATE,
-            ),
-
-        ]
-    )
     return create_retriever_tool(
         retriever,
         name="pdf_retriever",
-        description="Retrieve information from uploaded PDF documents.",
-        document_prompt=prompt
+        description="Retrieve information from uploaded PDF documents."
     )
 
 ### GRAPH NODES ###
@@ -139,47 +128,8 @@ GRADE_PROMPT = """You are a grader assessing document relevance.\nDocument:\n{co
 
 def grade_documents(state: State) -> Literal["generate_answer", "chatbot"]:
     logger.info("Grading document relevance")
-
-    # Get the original user question (first human message)
-    user_messages = [msg for msg in state["messages"]
-                     if isinstance(msg, HumanMessage)]
-    if not user_messages:
-        logger.warning("No user message found for grading")
-        return "chatbot"
-
-    # Extract the actual question from the user message
-    # Remove the file upload context we added in Solution 1
-    question = user_messages[-1].content
-    if "Please use the pdf_retriever tool to answer my question:" in question:
-        question = question.split(
-            "Please use the pdf_retriever tool to answer my question:")[-1].strip()
-    elif "I have uploaded the following PDF file(s):" in question:
-        # Extract just the question part
-        parts = question.split("I have uploaded the following PDF file(s):")
-        if len(parts) > 1 and ":" in parts[1]:
-            question = parts[1].split(":", 1)[-1].strip()
-
-    logger.info(f"Extracted question for grading: {question}")
-
-    # Look for ToolMessage in the state - this contains the retrieved documents
-    from langchain_core.messages import ToolMessage
-    tool_messages = [msg for msg in state["messages"]
-                     if isinstance(msg, ToolMessage)]
-
-    if not tool_messages:
-        logger.warning("No tool messages found for grading")
-        return "chatbot"
-
-    # Get the content from the most recent tool message (retrieved documents)
-    context = tool_messages[-1].content
-
-    if not context:
-        logger.warning("No retrieved document content found for grading")
-        return "chatbot"
-
-    logger.info(f"Grading with question: {question[:100]}...")
-    logger.info(f"Grading with context: {context[:1000]}...")
-
+    question = state["messages"][0].content
+    context = state["messages"][-1].content
     prompt = GRADE_PROMPT.format(question=question, context=context)
 
     response = llm.with_structured_output(GradeDocuments).invoke(
