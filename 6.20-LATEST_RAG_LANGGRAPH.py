@@ -20,13 +20,67 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RAG_CLASSIFIER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE, FORMATTER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_TEMPLATE
+from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE, FORMATTER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE2
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
 from typing_extensions import TypedDict
-from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE_2
+from templates.system.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_STRUCTURED_OUTPUT
+from templates.system.analyzer import ANALYZER_SYSTEM_PROMPT
 from utils.file import load_files_into_db,  retrieve_chunks
+from pydantic import BaseModel, Field
+
+
+#### RETRIEVER STRUCTURED OUTPUTS ####
+
+
+class LabResult(BaseModel):
+    test_name: str
+    value: str
+    reference_range: Optional[str]
+    interpretation: Optional[str]
+
+
+class ImagingResult(BaseModel):
+    modality: str
+    date: Optional[str]
+    findings: str
+
+
+class MedicalDocumentSummary(BaseModel):
+    document_title: str
+    date: Optional[str]
+    lab_results: List[LabResult]
+    imaging_results: List[ImagingResult]
+    other_notes: Optional[List[str]]
+
+#### ANALYSIS STRUCTURED OUTPUTS ####
+
+# class MedicalAnalysis(BaseModel):
+#     key_findings: str = Field(
+#         description="Summarize the key medical findings from the patient's documents.")
+#     clinical_implications: str = Field(
+#         description="Explain what these findings imply about the patient's health.")
+#     medical_breakdown: str = Field(
+#         description="Provide a medically detailed explanation of the findings.")
+#     recommendations: str = Field(
+#         description="List any recommended next steps, monitoring, or treatments.")
+
+
+class MedicalAnalysis(BaseModel):
+    key_findings: str = Field(description="Concise summary of what's found.")
+    clinical_interpretation: str = Field(
+        description="Medical meaning of the findings.")
+    medical_breakdown: str = Field(
+        description="Detailed reasoning, logic, and science.")
+    recommendations: str = Field(description="Next steps, monitoring advice.")
+
+
+class UserMessageState(MessagesState):
+    document_context: Any
+    retrieved_docs: List[Any]
+    analysis: MedicalAnalysis
+    is_medical_question: bool
 
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -43,13 +97,6 @@ rag_llm = ChatOpenAI(model="gpt-4o-mini")
 research_llm = ChatOpenAI(model="gpt-4o-mini")
 analysis_llm = ChatOpenAI(model="gpt-4o-mini")
 formatter_llm = ChatOpenAI(model="gpt-4o-mini")
-
-
-class UserMessageState(MessagesState):
-    document_context: Any
-    retrieved_docs: List[Any]
-    analysis: SystemMessage
-    is_medical_question: bool
 
 
 def format_docs(docs: List[Document]):
@@ -141,20 +188,24 @@ async def on_chat_start():
             [
                 (
                     "system",
-                    RETRIEVER_SYSTEM_TEMPLATE_2,
+                    RETRIEVER_SYSTEM_PROMPT,
+                    # RETRIEVER_STRUCTURED_OUTPUT
                 ),
-
+                ("human", "{message}")
             ]
         )
 
         chain = prompt | rag_llm | StrOutputParser()
+        # chain = prompt | rag_llm.with_structured_output(MedicalDocumentSummary)
+
         response = chain.invoke(
-            {"input": message.content, "context": retrieved_text})
-        # print(f"retreived docs response: {response}")
+            {"message": message.content, "context": retrieved_text})
+        print(f"\n\nretrieve_docs() response: {response[:500]}\n\n")
+
         return {
             "document_context": response,
             "retrieved_docs": retrieved_text,
-            "messages": [SystemMessage(content=response)]
+            # "messages": [SystemMessage(content=response)]
         }
 
     # node 2a - researcher node
@@ -170,42 +221,57 @@ async def on_chat_start():
         print(f"analyze()")
         message = state["messages"][-1]
         document_context = state["document_context"]
-        retrieved_docs = state["retrieved_docs"]
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    MEDICAL_ANALYSIS_PROMPT_TEMPLATE,
-                ),
-                ("human", "{message}"),
-            ]
-        )
-        llm = prompt | analysis_llm
-        response = llm.invoke(
-            # {"message": message, "context": format_docs(retrieved_docs), }
-            {"message": message, "context": document_context, }
-        )
 
-        return {"messages": [SystemMessage(content=response.content)]}
+        prompt = ChatPromptTemplate.from_messages([
+            # ("system", MEDICAL_ANALYSIS_PROMPT_TEMPLATE),
+            ("system", ANALYZER_SYSTEM_PROMPT),
+            ("human", "{message}")
+        ])
+
+        chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
+        response = chain.invoke(
+            {"message": message.content, "context": document_context})
+
+        # Format the structured response into markdown or keep structured depending on downstream use
+    #     formatted = f"""
+    # ### ✅ Key Findings
+    # {response.key_findings}
+
+    # ### 🧠 Clinical Implications
+    # {response.clinical_implications}
+
+    # ### 🧬 Medical Breakdown
+    # {response.medical_breakdown}
+
+    # ### 📌 Recommendations
+    # {response.recommendations}
+    # """
+    #     print(f"formatted: {formatted}")
+        # return {"messages": [SystemMessage(content=response)]}
+
+        # print(f"\n\nanalyze() response: {response[:500]}\n\n")
+        print(f"\n\nanalyze() MESSAGES: {state["messages"]}\n\n")
+        return {"analysis": response}
 
     # node 1b - default generator node
+
     def generate(state: UserMessageState):
         print(f"generate()")
-        # analysis = state.get("analysis", None)
-        analysis = state["messages"][-1]
+        analysis = state["analysis"]
+        message = state["messages"][-1]
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
                     FORMATTER_PROMPT_TEMPLATE,
                 ),
-                # ("human", "{message}"),
+                ("human", "{message}"),
             ]
         )
         llm = prompt | formatter_llm | StrOutputParser()
         # llm = formatter_llm  # | StrOutputParser()
-        response = llm.invoke({"message": analysis.content}
-                              )
+        response = llm.invoke(
+            {"analysis": analysis, "message": message.content})
 
         # print(f"all messages: {state["messages"]}")
 
@@ -260,26 +326,28 @@ async def on_message(message: cl.Message):
 
     app = cast(Runnable, cl.user_session.get("app"))
 
-    answer = cl.Message(content="")
     config: RunnableConfig = {
         "configurable": {"thread_id": cl.context.session.thread_id}
     }
-    # cb = cl.LangchainCallbackHandler()
-    # await answer.send()
+
+    answer = cl.Message(content="")
+
     async for msg, metadata in app.astream(
-        {"messages": chat_history},
-        # the below line causes this console error:
-        # `2025-06-23 19:05:34 - Error in callback coroutine: TracerException('No indexed run ID 7421f269-ebfc-4806-ac28-21423c5f65bf.')`
-        # config=RunnableConfig(callbacks=[cb], **config),
+        # {"messages": chat_history},
+        {"messages": [HumanMessage(content=message.content)]},
+
         config,
         stream_mode="messages",
     ):
         if (
             msg.content
-            and isinstance(msg, AIMessage)
+            and isinstance(msg, AIMessageChunk)
             and metadata["langgraph_node"] == "generate"
         ):
-            answer.content += msg.content  # type: ignore
+            # print(f"msg meta: {metadata}")
+            print(f"msg: {msg}")
+            # answer.content += msg.content  # type: ignore
             await answer.stream_token(msg.content)
+            # await answer.update(msg.content)
 
     await answer.update()

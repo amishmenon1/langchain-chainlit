@@ -6,7 +6,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utils.message import new_message, update_message
 from typing import cast
 from langchain.prompts import ChatPromptTemplate
-from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
+# from templates.system.retriever import RETRIEVER_SYSTEM_TEMPLATE
 
 CHROMA_PATH = 'chroma'
 
