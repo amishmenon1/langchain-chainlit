@@ -20,15 +20,18 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE, FORMATTER_PROMPT_TEMPLATE, MEDICAL_ANALYSIS_PROMPT_TEMPLATE2
+from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
 from typing_extensions import TypedDict
 from templates.system.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_STRUCTURED_OUTPUT
 from templates.system.analyzer import ANALYZER_SYSTEM_PROMPT
+from templates.system.formatter import FORMATTER_PROMPT_TEMPLATE, CONVERSATIONAL_FORMATTER_PROMPT
 from utils.file import load_files_into_db,  retrieve_chunks
 from pydantic import BaseModel, Field
+import pprint
+import os
 
 
 #### RETRIEVER STRUCTURED OUTPUTS ####
@@ -38,7 +41,7 @@ class LabResult(BaseModel):
     test_name: str
     value: str
     reference_range: Optional[str]
-    interpretation: Optional[str]
+    # interpretation: Optional[str]
 
 
 class ImagingResult(BaseModel):
@@ -56,16 +59,6 @@ class MedicalDocumentSummary(BaseModel):
 
 #### ANALYSIS STRUCTURED OUTPUTS ####
 
-# class MedicalAnalysis(BaseModel):
-#     key_findings: str = Field(
-#         description="Summarize the key medical findings from the patient's documents.")
-#     clinical_implications: str = Field(
-#         description="Explain what these findings imply about the patient's health.")
-#     medical_breakdown: str = Field(
-#         description="Provide a medically detailed explanation of the findings.")
-#     recommendations: str = Field(
-#         description="List any recommended next steps, monitoring, or treatments.")
-
 
 class MedicalAnalysis(BaseModel):
     key_findings: str = Field(description="Concise summary of what's found.")
@@ -80,13 +73,16 @@ class UserMessageState(MessagesState):
     document_context: Any
     retrieved_docs: List[Any]
     analysis: MedicalAnalysis
-    is_medical_question: bool
+    previous_user_message: str
 
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000, chunk_overlap=200, add_start_index=True
 )
 CHROMA_PATH = 'chroma'
+
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"] = "6.25-Chainlit-Langgraph-Assistant"
 
 chat_history = []
 
@@ -103,48 +99,6 @@ def format_docs(docs: List[Document]):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-async def load_files_into_vectordb(files=[]):
-    print(f"Creating RAG chain...")
-    # Process the attached files
-
-    all_pdf_pages = []
-    processed_filenames = []
-    all_doc_chunks = []
-    if len(files) > 0:
-        for file in files:
-            print(f"Loading attached file: {file.name}")
-            try:
-                loader = PyPDFLoader(file.path)
-                pdf_pages = []
-                for page in loader.lazy_load():
-                    page.metadata['source_file'] = file.name
-                    pdf_pages.append(page)
-
-                all_pdf_pages.extend(pdf_pages)
-                processed_filenames.append(file.name)
-                print(
-                    f"Successfully processed: {file.name} ({len(pdf_pages)} pages)")
-
-            except Exception as e:
-                print(f"Error processing {file.name}: {str(e)}")
-
-    if all_pdf_pages:
-        # Split the text into chunks
-        all_doc_chunks = text_splitter.split_documents(all_pdf_pages)
-        print(f"Length of all text splits: {len(all_doc_chunks)}")
-
-    # Create vector store with all documents
-    vector_store = Chroma.from_documents(
-        documents=all_doc_chunks, embedding=OpenAIEmbeddings(), persist_directory=CHROMA_PATH)
-
-    existing_chunks = cl.user_session.get("extracted_data", [])
-    cl.user_session.set("last_attached_docs", all_doc_chunks)
-    cl.user_session.set("extracted_data", existing_chunks + all_doc_chunks)
-    cl.user_session.set("vector_store", vector_store)
-    print(f"Successfully saved vector store to session")
-    return vector_store
-
-
 @cl.on_chat_start
 async def on_chat_start():
 
@@ -153,59 +107,58 @@ async def on_chat_start():
 
     # node 1 - classifier node
     def classify_message(state: UserMessageState):
-        print(f"classify_message()")
+        print(f"\n-----classify_message()-----\n")
         message = state["messages"][-1]
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    MSG_CLASSIFIER_PROMPT_TEMPLATE,
-                ),
-                ("human", "{message}"),
-            ]
-        )
-        llm = prompt | msg_classifier_llm
-        response = llm.invoke({"message": message})
-        is_med_question = response.content
 
-        if is_med_question:
-            print(f"User is asking a medical question")
-            return True
+        prompt = ChatPromptTemplate.from_template(
+            MSG_CLASSIFIER_PROMPT_TEMPLATE)
 
-        else:
-            print(f"User is asking a general question")
-            return False
+        chain = prompt | msg_classifier_llm
+        result = chain.invoke({"message": message.content}
+                              ).content.strip().lower()
+
+        print(f"\n\nclassify output:\n {result}\n\n")
+        return result
+
+        # if result == "file":
+        #     return True  # Proceed to RAG + Analyzer
+        # elif result == "medical":
+        #     return True  # Proceed to RAG + Analyzer
+        # else:
+        #     return False  # Go directly to generate()
 
     # node 1a - RAG node
 
     async def retrieve_docs(state: UserMessageState):
-        print(f"retrieve_docs()")
+        print(f"\n-----retrieve_docs()-----\n")
         message = state["messages"][-1]
+
+        print(f"message: {message.content}")
+
         retrieved_text, unique_sources = await retrieve_chunks(
             message_content=message.content)
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    RETRIEVER_SYSTEM_PROMPT,
-                    # RETRIEVER_STRUCTURED_OUTPUT
-                ),
-                ("human", "{message}")
-            ]
-        )
+        prompt = ChatPromptTemplate.from_template(RETRIEVER_SYSTEM_PROMPT)
 
-        chain = prompt | rag_llm | StrOutputParser()
-        # chain = prompt | rag_llm.with_structured_output(MedicalDocumentSummary)
+        # chain = prompt | rag_llm | StrOutputParser()
+        chain = prompt | rag_llm.with_structured_output(MedicalDocumentSummary)
 
         response = chain.invoke(
             {"message": message.content, "context": retrieved_text})
-        print(f"\n\nretrieve_docs() response: {response[:500]}\n\n")
+
+        pprint.pprint(
+            f"\n\nretrieve_docs() output:\n {response.model_dump()}\n\n")
+
+        if not response.lab_results and not response.imaging_results and not response.other_notes:
+            print("⚠️ Empty document content. Skipping downstream analysis.")
+            return {
+                "document_context": None,
+                "retrieved_docs": [],
+            }
 
         return {
             "document_context": response,
             "retrieved_docs": retrieved_text,
-            # "messages": [SystemMessage(content=response)]
         }
 
     # node 2a - researcher node
@@ -218,63 +171,76 @@ async def on_chat_start():
     # node 3a - analyzer node
 
     def analyze(state: UserMessageState):
-        print(f"analyze()")
+        print(f"\n-----analyze()-----\n")
         message = state["messages"][-1]
-        document_context = state["document_context"]
+        document_context = state.get("document_context", None)
 
-        prompt = ChatPromptTemplate.from_messages([
-            # ("system", MEDICAL_ANALYSIS_PROMPT_TEMPLATE),
-            ("system", ANALYZER_SYSTEM_PROMPT),
-            ("human", "{message}")
-        ])
+        prompt = ChatPromptTemplate.from_template(ANALYZER_SYSTEM_PROMPT)
 
         chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
         response = chain.invoke(
             {"message": message.content, "context": document_context})
 
-        # Format the structured response into markdown or keep structured depending on downstream use
-    #     formatted = f"""
-    # ### ✅ Key Findings
-    # {response.key_findings}
+        pprint.pprint(f"\n\nanalyze() output:\n{response.model_dump()}\n\n")
 
-    # ### 🧠 Clinical Implications
-    # {response.clinical_implications}
-
-    # ### 🧬 Medical Breakdown
-    # {response.medical_breakdown}
-
-    # ### 📌 Recommendations
-    # {response.recommendations}
-    # """
-    #     print(f"formatted: {formatted}")
-        # return {"messages": [SystemMessage(content=response)]}
-
-        # print(f"\n\nanalyze() response: {response[:500]}\n\n")
-        print(f"\n\nanalyze() MESSAGES: {state["messages"]}\n\n")
         return {"analysis": response}
 
     # node 1b - default generator node
 
     def generate(state: UserMessageState):
-        print(f"generate()")
-        analysis = state["analysis"]
+        print("\n-----generate()-----\n")
         message = state["messages"][-1]
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    FORMATTER_PROMPT_TEMPLATE,
-                ),
-                ("human", "{message}"),
-            ]
+        analysis = state.get("analysis", None)
+
+        # Retrieve the full chat history as a text block.
+        chat_history_text = "\n".join(
+            f"{m.__class__.__name__}: {m.content}" for m in state["messages"])
+
+        # Extract the last user message (prior to current) if needed.
+        previous_user_message = next(
+            (m.content for m in reversed(
+                state["messages"][:-1]) if isinstance(m, HumanMessage)),
+            ""
         )
+
+        # Decide which prompt to use based on analysis content.
+        # For example: if the analysis exists and the current message is a clear clinical inquiry, use structured.
+        # Otherwise, use the conversational format.
+        # You can refine this logic depending on your use case.
+        use_conversational = True
+        # Alternatively, if analysis is missing or empty, treat as conversational.
+        # if analysis is None or not any(getattr(analysis, field, "").strip() for field in ["key_findings", "clinical_interpretation", "medical_breakdown", "recommendations"]):
+        #     use_conversational = True
+
+        if use_conversational:
+            print("→ Using conversational formatter")
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", CONVERSATIONAL_FORMATTER_PROMPT),
+                ("human", "{message}")
+            ])
+            inputs = {
+                "previous_user_message": previous_user_message,
+                "chat_history": chat_history_text,
+                "message": message.content,
+                # can be None or partial; template will handle if not present.
+                "analysis": analysis
+            }
+        else:
+            print("→ Using clinical formatter")
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", FORMATTER_PROMPT_TEMPLATE),
+                ("human", "{message}")
+            ])
+            inputs = {
+                "analysis": analysis,
+                "message": message.content,
+                # if your clinical prompt uses it.
+                "chat_history": chat_history_text,
+                "previous_user_message": previous_user_message
+            }
+
         llm = prompt | formatter_llm | StrOutputParser()
-        # llm = formatter_llm  # | StrOutputParser()
-        response = llm.invoke(
-            {"analysis": analysis, "message": message.content})
-
-        # print(f"all messages: {state["messages"]}")
-
+        response = llm.invoke(inputs)
         return {"messages": [AIMessage(content=response)]}
 
     workflow.add_node("retrieve_docs", retrieve_docs)
@@ -284,9 +250,10 @@ async def on_chat_start():
 
     workflow.add_conditional_edges(START, classify_message, {
         # If medical question, use RAG and medical analysis
-        True: "retrieve_docs",
+        "file": "retrieve_docs",
         # Otherwise use general model completion
-        False: "generate",
+        "medical": "analyze",
+        "general": "generate"
     })
 
     workflow.add_edge("retrieve_docs", "web_search")
@@ -302,6 +269,7 @@ async def on_chat_start():
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    print(cl.chat_context.to_openai())
     # Check if files are attached to this message
     attached_files = None
     if hasattr(message, 'elements') and message.elements:
@@ -344,10 +312,7 @@ async def on_message(message: cl.Message):
             and isinstance(msg, AIMessageChunk)
             and metadata["langgraph_node"] == "generate"
         ):
-            # print(f"msg meta: {metadata}")
-            print(f"msg: {msg}")
-            # answer.content += msg.content  # type: ignore
+
             await answer.stream_token(msg.content)
-            # await answer.update(msg.content)
 
     await answer.update()

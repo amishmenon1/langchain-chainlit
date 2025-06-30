@@ -147,7 +147,7 @@ async def retrieve_chunks(message_content: str):
             f"SOURCE FILE: {get_source_file(doc, stored_texts, metadatas)}\n{doc.page_content}"
             for doc in comprehensive_docs
         ])
-        print(f"updating retrieve msg")
+        # print(f"updating retrieve msg")
         await update_message(msg=retrieve_msg, content=f"✅ Documents retrieved from {len(all_file_sources)} files")
 
         unique_sources = generate_sources(
