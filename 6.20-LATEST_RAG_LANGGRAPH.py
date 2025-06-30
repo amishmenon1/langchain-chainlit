@@ -20,14 +20,14 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE
+from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_PROMPT, ANALYZER_SYSTEM_PROMPT, CONVERSATIONAL_FORMATTER_PROMPT, RAG_QA_PROMPT_TEMPLATE
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
 from typing_extensions import TypedDict
-from templates.system.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_STRUCTURED_OUTPUT
-from templates.system.analyzer import ANALYZER_SYSTEM_PROMPT
-from templates.system.formatter import FORMATTER_PROMPT_TEMPLATE, CONVERSATIONAL_FORMATTER_PROMPT
+# from templates.system.retriever import RETRIEVER_SYSTEM_PROMPT, RETRIEVER_STRUCTURED_OUTPUT
+# from templates.system.analyzer import ANALYZER_SYSTEM_PROMPT
+# from templates.system.formatter import FORMATTER_PROMPT_TEMPLATE, CONVERSATIONAL_FORMATTER_PROMPT
 from utils.file import load_files_into_db,  retrieve_chunks
 from pydantic import BaseModel, Field
 import pprint
@@ -68,12 +68,27 @@ class MedicalAnalysis(BaseModel):
         description="Detailed reasoning, logic, and science.")
     recommendations: str = Field(description="Next steps, monitoring advice.")
 
+#### CLASSIFICATION STRUCTURE ####
+# class GradeQuestion(BaseModel):
+#     score: str = Field(description="Is the question asking a clinical-related question, file-related question, or general question")
+
+
+class GradeDocument(BaseModel):
+    score: str = Field(
+        description="Is the document relevant to the question? If yes -> 'Yes'. If not -> 'No'.")
+
+
+#### GRAPH STATE ####
+
 
 class UserMessageState(MessagesState):
     document_context: Any
-    retrieved_docs: List[Any]
+    retrieved_docs: Annotated[List[Document], operator.add]
     analysis: MedicalAnalysis
     previous_user_message: str
+    rephrased_question: str
+    rephrase_count: int
+    proceed: bool
 
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -89,7 +104,7 @@ chat_history = []
 default_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 msg_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
 rag_classifier_llm = ChatOpenAI(model="gpt-4o-mini")
-rag_llm = ChatOpenAI(model="gpt-4o-mini")
+rag_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 research_llm = ChatOpenAI(model="gpt-4o-mini")
 analysis_llm = ChatOpenAI(model="gpt-4o-mini")
 formatter_llm = ChatOpenAI(model="gpt-4o-mini")
@@ -105,9 +120,35 @@ async def on_chat_start():
     # Define a new graph
     workflow = StateGraph(state_schema=MessagesState)
 
+    def question_rewriter(state: UserMessageState):
+        print(f"\n----question_rewriter()----\n")
+        # state["retrieved_docs"] = []
+        state["rephrased_question"] = ""
+        state["proceed"] = False
+
+        if len(state["messages"]) > 1:
+            conversation = state["messages"][:-1]
+            current_question = state["messages"][-1]
+            messages = [
+                SystemMessage(
+                    content="You are a helpful assistent that rephrases the user's question to be a standalone question optimized for retrieval.")
+            ]
+            messages.extend(conversation)
+            messages.append(HumanMessage(content=current_question.content))
+            rephrase_prompt = ChatPromptTemplate.from_messages(messages)
+            prompt = rephrase_prompt.format()
+            response = default_llm.invoke(prompt)
+            better_question = response.content.strip()
+            print(f"\n\nRephrased question:\n{better_question}\n\n")
+            return {
+                "rephrased_question": better_question
+            }
+
     # node 1 - classifier node
     def classify_message(state: UserMessageState):
         print(f"\n-----classify_message()-----\n")
+        print(
+            f"\nRephrased question: {state.get("rephrased_question", None)}\n")
         message = state["messages"][-1]
 
         prompt = ChatPromptTemplate.from_template(
@@ -120,51 +161,125 @@ async def on_chat_start():
         print(f"\n\nclassify output:\n {result}\n\n")
         return result
 
-        # if result == "file":
-        #     return True  # Proceed to RAG + Analyzer
-        # elif result == "medical":
-        #     return True  # Proceed to RAG + Analyzer
-        # else:
-        #     return False  # Go directly to generate()
-
     # node 1a - RAG node
 
     async def retrieve_docs(state: UserMessageState):
         print(f"\n-----retrieve_docs()-----\n")
         message = state["messages"][-1]
+        rephrased_message = state.get("rephrased_question", message.content)
 
-        print(f"message: {message.content}")
+        print(f"rephrased message: {rephrased_message}")
 
-        retrieved_text, unique_sources = await retrieve_chunks(
-            message_content=message.content)
+        docs = []
+        vector_store = cast(Chroma, cl.user_session.get("vector_store", None))
+        if vector_store:
+            retriever = vector_store.as_retriever(
+                search_kwargs={"k": 5, })  # Increased to get more coverage
+            similarity_docs = retriever.invoke(rephrased_message)
+            docs.extend(similarity_docs)
 
+            print(f"Documents retrieved: {len(similarity_docs)}")
+
+        return {
+            "retrieved_docs": docs
+        }
+
+    def retrieval_grader(state: UserMessageState):
+        print(f"\n----retrieval_grader()----\n")
+        print(
+            f"\n\nRephrased question: {state.get("rephrased_question", None)}\n\n")
+        message = state["messages"][-1]
+        system_msg = SystemMessage(content="""
+            You are a grader assessing the relevance of a retrieved document to a user question. Only answer with 'Yes' or 'No'. If the document contains information relevant to the user's query, respond with 'Yes'. Otherwise, respond with 'No'.
+        """)
+
+        structured_llm = rag_llm.with_structured_output(GradeDocument)
+        relevant_docs = []
+        for doc in state.get("retrieved_docs", []):
+            human_msg = HumanMessage(
+                content=f"User question:{state.get("rephrased_question", message.content)}\n\nRetrieved document:\n{doc.page_content}")
+            grade_prompt = ChatPromptTemplate.from_messages(
+                [system_msg, human_msg])
+            grader_llm = grade_prompt | structured_llm
+            result = grader_llm.invoke({})
+            print(
+                f"\n\nGrading document: {doc.page_content[:30]}... \n\nResult: {result.score.strip()}")
+
+            if result.score.strip().lower() == "yes":
+                relevant_docs.append(doc)
+            print(
+                f"proceed: {len(relevant_docs) > 0}")
+        # return {
+        #     "retrieved_docs": relevant_docs,
+        #     "proceed": len(relevant_docs) > 0
+        # }
+        return {
+            "retrieved_docs": relevant_docs,
+            "proceed": True
+        }
+
+    def proceed_router(state: UserMessageState):
+        print(f"\n----proceed_router()----\n")
+        rephrase_count = state.get("rephrase_count", 0)
+        if state.get("proceed", False):
+            print(f"\n\nRouting to generate_answer\n\n")
+            return "proceed"
+        elif rephrase_count >= 2:
+            print(f"Max rephrase attempts reached. Cannot find relevant documents.")
+            return "generate"
+        else:
+            print("Routing to refine_question")
+            return "refine_question"
+
+    def refine_question(state: UserMessageState):
+        print(f"\n----refine_question()----\n")
+        rephrase_count = state.get("rephrase_count", 0)
+        if rephrase_count >= 2:
+            print(f"Maximum rephrase attempts reached")
+            return state
+        question_to_refine = state.get("rephrased_question", None)
+        system_msg = SystemMessage(
+            content="You are a helpful assistant that slightly refines the user's question to improve retrieval results. Provide a slightly adjusted version of the question.")
+        human_msg = HumanMessage(
+            content=f"Original question: {question_to_refine}\n\nProvide a slightly refined question.")
+        refine_prompt = ChatPromptTemplate.from_messages(
+            [system_msg, human_msg])
+        prompt = refine_prompt.format()
+        response = rag_llm.invoke(prompt)
+        refined_question = response.content.strip()
+        print(f"\n\nRefined question: {refined_question}\n\n")
+        return {
+            "rephrased_question": refined_question,
+            "rephrase_count": rephrase_count + 1
+        }
+
+    def perform_rag_qa(state: UserMessageState):
+        print(f"\n----perform_rag_qa()----\n")
+        history = state["messages"][:-1]
+        message = state["messages"][-1]
+        documents = state.get("retrieved_docs", [])
+        rephrased_question = state.get("rephrased_question", message.content)
+        messages = state["messages"]
+        print(f"\n\nmessage: {message}")
+
+        # prompt = ChatPromptTemplate.from_template(RAG_QA_PROMPT_TEMPLATE)
         prompt = ChatPromptTemplate.from_template(RETRIEVER_SYSTEM_PROMPT)
-
-        # chain = prompt | rag_llm | StrOutputParser()
         chain = prompt | rag_llm.with_structured_output(MedicalDocumentSummary)
 
         response = chain.invoke(
-            {"message": message.content, "context": retrieved_text})
-
-        pprint.pprint(
-            f"\n\nretrieve_docs() output:\n {response.model_dump()}\n\n")
-
-        if not response.lab_results and not response.imaging_results and not response.other_notes:
-            print("⚠️ Empty document content. Skipping downstream analysis.")
-            return {
-                "document_context": None,
-                "retrieved_docs": [],
-            }
+            {"message": rephrased_question, "context": documents, "history": messages})
+        print(f"\n\nresponse: {response}")
+        # generation = response.content.strip()
+        # messages.append(AIMessage(content=response))
 
         return {
-            "document_context": response,
-            "retrieved_docs": retrieved_text,
+            "document_context": response
         }
 
     # node 2a - researcher node
 
     def web_search(state: UserMessageState):
-        print(f"web_search()")
+        print(f"\n----web_search()----\n")
         # TODO implement method using pub med and web search tools
         return state
 
@@ -173,16 +288,27 @@ async def on_chat_start():
     def analyze(state: UserMessageState):
         print(f"\n-----analyze()-----\n")
         message = state["messages"][-1]
+        messages = state["messages"]
         document_context = state.get("document_context", None)
-
+        print(f"user message: {message.content}")
         prompt = ChatPromptTemplate.from_template(ANALYZER_SYSTEM_PROMPT)
 
         chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
         response = chain.invoke(
-            {"message": message.content, "context": document_context})
+            {"message": message.content, "context": document_context, "history": messages})
 
         pprint.pprint(f"\n\nanalyze() output:\n{response.model_dump()}\n\n")
 
+        print("→ Using conversational formatter")
+        prompt = ChatPromptTemplate.from_template(
+            CONVERSATIONAL_FORMATTER_PROMPT)
+        inputs = {
+            "previous_user_message": message.content,
+            "chat_history": messages,
+            "message": message.content,
+            # can be None or partial; template will handle if not present.
+            "analysis": response
+        }
         return {"analysis": response}
 
     # node 1b - default generator node
@@ -214,10 +340,8 @@ async def on_chat_start():
 
         if use_conversational:
             print("→ Using conversational formatter")
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", CONVERSATIONAL_FORMATTER_PROMPT),
-                ("human", "{message}")
-            ])
+            prompt = ChatPromptTemplate.from_template(
+                CONVERSATIONAL_FORMATTER_PROMPT)
             inputs = {
                 "previous_user_message": previous_user_message,
                 "chat_history": chat_history_text,
@@ -225,39 +349,51 @@ async def on_chat_start():
                 # can be None or partial; template will handle if not present.
                 "analysis": analysis
             }
-        else:
-            print("→ Using clinical formatter")
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", FORMATTER_PROMPT_TEMPLATE),
-                ("human", "{message}")
-            ])
-            inputs = {
-                "analysis": analysis,
-                "message": message.content,
-                # if your clinical prompt uses it.
-                "chat_history": chat_history_text,
-                "previous_user_message": previous_user_message
-            }
+        # else:
+        #     print("→ Using clinical formatter")
+        #     prompt = ChatPromptTemplate.from_messages([
+        #         ("system", FORMATTER_PROMPT_TEMPLATE),
+        #         ("human", "{message}")
+        #     ])
+        #     inputs = {
+        #         "analysis": analysis,
+        #         "message": message.content,
+        #         # if your clinical prompt uses it.
+        #         "chat_history": chat_history_text,
+        #         "previous_user_message": previous_user_message
+        #     }
 
         llm = prompt | formatter_llm | StrOutputParser()
         response = llm.invoke(inputs)
         return {"messages": [AIMessage(content=response)]}
 
+    workflow.add_node("question_rewriter", question_rewriter)
     workflow.add_node("retrieve_docs", retrieve_docs)
+    workflow.add_node("retrieval_grader", retrieval_grader)
+    workflow.add_node("refine_question", refine_question)
+    workflow.add_node("proceed_router", proceed_router)
+    workflow.add_node("perform_rag_qa", perform_rag_qa)
     workflow.add_node("web_search", web_search)
     workflow.add_node("analyze", analyze)
     workflow.add_node("generate", generate)
 
-    workflow.add_conditional_edges(START, classify_message, {
+    workflow.add_edge(START, "question_rewriter")
+    workflow.add_conditional_edges("question_rewriter", classify_message, {
         # If medical question, use RAG and medical analysis
         "file": "retrieve_docs",
         # Otherwise use general model completion
         "medical": "analyze",
         "general": "generate"
     })
-
-    workflow.add_edge("retrieve_docs", "web_search")
-    workflow.add_edge("web_search", "analyze")
+    workflow.add_edge("retrieve_docs", "retrieval_grader")
+    workflow.add_conditional_edges("retrieval_grader", proceed_router, {
+        "proceed": "web_search",
+        "refine_question": "refine_question",
+        "generate": "generate"
+    })
+    workflow.add_edge("refine_question", "retrieve_docs")
+    workflow.add_edge("web_search", "perform_rag_qa")
+    workflow.add_edge("perform_rag_qa", "analyze")
     workflow.add_edge("analyze", "generate")
     workflow.add_edge("generate", END)
 
@@ -269,7 +405,7 @@ async def on_chat_start():
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    print(cl.chat_context.to_openai())
+    print(f"\n\nChat context:\n{cl.chat_context.to_openai()}\n\n")
     # Check if files are attached to this message
     attached_files = None
     if hasattr(message, 'elements') and message.elements:
