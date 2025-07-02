@@ -13,3 +13,4 @@ pandas
 tabulate
 google-adk
 langgraph
+langchain-docling

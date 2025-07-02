@@ -20,7 +20,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_PROMPT, ANALYZER_SYSTEM_PROMPT, CONVERSATIONAL_FORMATTER_PROMPT, MSG_REWRITER_SYSTEM_PROMPT, RETRIEVAL_GRADER_PROMPT_TEMPLATE2
+from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_PROMPT, ANALYZER_SYSTEM_PROMPT, CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT, CONVERSATIONAL_FORMATTER_PROMPT, MSG_REWRITER_SYSTEM_PROMPT, RETRIEVAL_GRADER_PROMPT_TEMPLATE2
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
@@ -30,6 +30,7 @@ from utils.file import create_vectordb, add_files_to_db, get_all_patient_docs, e
 from pydantic import BaseModel, Field
 import pprint
 import os
+import asyncio
 
 
 #### RETRIEVER STRUCTURED OUTPUTS ####
@@ -76,17 +77,22 @@ class GradeDocument(BaseModel):
         description="Is the document relevant to the question? If yes -> 'Yes'. If not -> 'No'.")
 
 
+class RephrasedMessage(BaseModel):
+    rephrased_message: str = Field("")
+    asking_about_attachments: bool = Field("")
+
 #### GRAPH STATE ####
 
 
 class UserMessageState(MessagesState):
-    document_context: Any
+    document_context: Annotated[List[Document], operator.add]  # Any
     retrieved_docs: Annotated[List[Document], operator.add]
     analysis: MedicalAnalysis
     previous_user_message: str
     rephrased_question: str
     rephrase_count: int
     proceed: bool
+    asking_about_attachments: bool
 
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -121,24 +127,27 @@ async def on_chat_start():
         # state["retrieved_docs"] = []
         state["rephrased_question"] = ""
         state["proceed"] = False
+        # TODO check if user message is about an attached file
 
-        if len(state["messages"]) > 1:
-            conversation = state["messages"][:-1]
-            current_question = state["messages"][-1]
-            document_context = state.get("document_context", None)
+        # if len(state["messages"]) > 1:
+        conversation = state["messages"][:-1]
+        current_question = state["messages"][-1]
+        document_context = state.get("document_context", None)
 
-            rephrase_prompt = ChatPromptTemplate.from_template(
-                MSG_REWRITER_SYSTEM_PROMPT)
+        rephrase_prompt = ChatPromptTemplate.from_template(
+            MSG_REWRITER_SYSTEM_PROMPT)
 
-            chain = rephrase_prompt | default_llm | StrOutputParser()
+        chain = rephrase_prompt | default_llm.with_structured_output(
+            RephrasedMessage)
 
-            response = chain.invoke(
-                {"history": conversation, "context": document_context, "message": current_question})
-            better_question = response.strip()
-            print(f"\n\nRephrased question:\n{better_question}\n\n")
-            return {
-                "rephrased_question": better_question
-            }
+        response = chain.invoke(
+            {"history": conversation, "context": document_context, "message": current_question})
+        better_question = response.rephrased_message.strip()
+        print(f"\n\nrewriter response:\n{response}\n\n")
+        return {
+            "rephrased_question": better_question,
+            "asking_about_attachments": response.asking_about_attachments
+        }
 
     # node 1 - classifier node
     def classify_message(state: UserMessageState):
@@ -148,6 +157,7 @@ async def on_chat_start():
 
         message = state["messages"][-1]
         rephrased_message = state.get("rephrased_question", message.content)
+
         prompt = ChatPromptTemplate.from_template(
             MSG_CLASSIFIER_PROMPT_TEMPLATE)
 
@@ -167,13 +177,25 @@ async def on_chat_start():
         # else continue to analyze node
         message = state["messages"][-1]
         rephrased_message = state.get("rephrased_question", message.content)
+        updated_document_context = []
 
-        print(f"rephrased message: {rephrased_message}")
-
-        docs = await get_all_patient_docs()
+        if state.get('asking_about_attachments', False):
+            print(f"\n\nuser is asking about attachments\n\n")
+            if cl.user_session.get('has_attachments', False):
+                print(f"\n\nfound attached files\n\n")
+                updated_document_context = cl.user_session.get(
+                    'latest_attached_docs', []) + state.get('document_context', [])
+            else:
+                print(f"\n\nno files attached\n\n")
+                pass
+                # TODO return "please upload files that you have questions about"
+        else:
+            print(
+                f"\n\nuser is NOT asking about attachments. Retrieving all patient data...\n\n")
+            updated_document_context = await get_all_patient_docs()
         return {
-            "retrieved_docs": docs,
-            "document_context": docs
+            # "retrieved_docs": updated_document_context,
+            "document_context": updated_document_context
         }
 
     # node 2a - researcher node
@@ -190,16 +212,28 @@ async def on_chat_start():
         message = state["messages"][-1]
         messages = state["messages"]
         document_context = state.get("document_context", None)
-        print(f"user message: {message.content}")
-        prompt = ChatPromptTemplate.from_template(ANALYZER_SYSTEM_PROMPT)
+        # # Extract the last user message (prior to current) if needed.
+        previous_user_message = next(
+            (m.content for m in reversed(
+                state["messages"][:-1]) if isinstance(m, HumanMessage)),
+            ""
+        )
 
-        chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
+        print(f"\n\nuser message: {message.content}\n\n")
+
+        # prompt = ChatPromptTemplate.from_template(ANALYZER_SYSTEM_PROMPT)
+        prompt = ChatPromptTemplate.from_template(
+            CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT)
+
+        # chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
+        chain = prompt | analysis_llm | StrOutputParser()
         response = chain.invoke(
-            {"message": message.content, "context": document_context, "history": messages})
+            {"message": message.content, "context": document_context, "history": messages, "previous_user_message": previous_user_message})
 
-        pprint.pprint(f"\n\nanalyze() output:\n{response.model_dump()}\n\n")
+        pprint.pprint(f"\n\nanalyze() output:\n{response}\n\n")
 
-        return {"analysis": response}
+        # return {"analysis": response}
+        return {"messages": [AIMessage(content=response)]}
 
     # node 1b - default generator node
 
@@ -255,7 +289,8 @@ async def on_chat_start():
     })
 
     workflow.add_edge("retrieve_docs", "analyze")
-    workflow.add_edge("analyze", "generate")
+    # workflow.add_edge("analyze", "generate")
+    workflow.add_edge("analyze", END)
     workflow.add_edge("generate", END)
 
     # Add memory
@@ -277,9 +312,14 @@ async def on_message(message: cl.Message):
 
     # If files are attached, process them first
     if attached_files:
-        # sys_msg_1 = await new_message(
-        #     content="📎 **Files detected!**")
-        await add_files_to_db(attached_files)
+        cl.user_session.set('has_attachments', True)
+        extracted_docs, extracted_filenames = await extract_docs_from_files(attached_files)
+        asyncio.create_task(add_files_to_db(
+            extracted_docs, extracted_filenames))
+        # await add_files_to_db(attached_files)
+    else:
+        cl.user_session.set('has_attachments', False)
+        cl.user_session.set('latest_attached_docs', None)
 
     app = cast(Runnable, cl.user_session.get("app"))
 
@@ -298,7 +338,7 @@ async def on_message(message: cl.Message):
         if (
             msg.content
             and isinstance(msg, AIMessageChunk)
-            and (metadata["langgraph_node"] in ["generate"])
+            and (metadata["langgraph_node"] in ["generate", "analyze"])
         ):
 
             await answer.stream_token(msg.content)
