@@ -3,6 +3,8 @@ langchain-community
 langchain-unstructured
 langchain-openai
 langchain-chroma
+langgraph-supervisor
+langchain-tavily
 openai
 chainlit
 chromadb
@@ -14,3 +16,4 @@ tabulate
 google-adk
 langgraph
 langchain-docling
+ipython

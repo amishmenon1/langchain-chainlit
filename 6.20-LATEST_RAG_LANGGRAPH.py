@@ -20,17 +20,24 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from message import update_message, new_message
 from langchain import hub as prompts
-from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_PROMPT, ANALYZER_SYSTEM_PROMPT, CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT, CONVERSATIONAL_FORMATTER_PROMPT, MSG_REWRITER_SYSTEM_PROMPT, RETRIEVAL_GRADER_PROMPT_TEMPLATE2
+# from prompt_templates import MSG_CLASSIFIER_PROMPT_TEMPLATE, RETRIEVER_SYSTEM_PROMPT, ANALYZER_SYSTEM_PROMPT, CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT, CONVERSATIONAL_FORMATTER_PROMPT, MSG_REWRITER_SYSTEM_PROMPT, RETRIEVAL_GRADER_PROMPT_TEMPLATE2
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 import logging
 import operator
 from typing_extensions import TypedDict
 # from utils.file import load_files_into_db,  retrieve_chunks
+# extract_docs_from_files_parallel
 from utils.file import create_vectordb, add_files_to_db, get_all_patient_docs, extract_docs_from_files
 from pydantic import BaseModel, Field
 import pprint
 import os
 import asyncio
+from templates.system.generated_rewriter import MSG_REWRITER_SYSTEM_PROMPT
+from templates.system.generated_classifier import MSG_CLASSIFIER_PROMPT_TEMPLATE
+from templates.system.generated_retriever import RETRIEVER_SYSTEM_PROMPT
+from templates.system.generated_research import RESEARCH_SYSTEM_PROMPT
+from templates.system.generated_analysis import CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT
+from templates.system.generated_generate import CONVERSATIONAL_FORMATTER_PROMPT
 
 
 #### RETRIEVER STRUCTURED OUTPUTS ####
@@ -40,6 +47,7 @@ class LabResult(BaseModel):
     test_name: str
     value: str
     reference_range: Optional[str]
+    date: str
     # interpretation: Optional[str]
 
 
@@ -49,23 +57,47 @@ class ImagingResult(BaseModel):
     findings: str
 
 
+# class MedicalDocumentSummary(BaseModel):
+#     document_title: str
+#     date: Optional[str]
+#     lab_results: List[LabResult]
+#     imaging_results: List[ImagingResult]
+#     other_notes: Optional[List[str]]
+
 class MedicalDocumentSummary(BaseModel):
     document_title: str
-    date: Optional[str]
+    report_date: str
+    # lab_test_date: str
     lab_results: List[LabResult]
-    imaging_results: List[ImagingResult]
+    # imaging_results: List[ImagingResult]
     other_notes: Optional[List[str]]
 
 #### ANALYSIS STRUCTURED OUTPUTS ####
 
 
+# class MedicalAnalysis(BaseModel):
+#     key_findings: str = Field(description="Concise summary of what's found.")
+#     clinical_interpretation: str = Field(
+#         description="Medical meaning of the findings.")
+#     medical_breakdown: str = Field(
+#         description="Detailed reasoning, logic, and science.")
+#     recommendations: str = Field(description="Next steps, monitoring advice.")
+
 class MedicalAnalysis(BaseModel):
-    key_findings: str = Field(description="Concise summary of what's found.")
-    clinical_interpretation: str = Field(
-        description="Medical meaning of the findings.")
-    medical_breakdown: str = Field(
-        description="Detailed reasoning, logic, and science.")
-    recommendations: str = Field(description="Next steps, monitoring advice.")
+    key_findings: str = Field(
+        description="Important observations and patterns identified")
+    medical_analysis: str = Field(
+        description="Comprehensive analysis of the medical situation")
+    risk_assessment: str = Field(
+        description="Assessment of urgency and risk factors")
+    immediate_action_needed: str = Field(
+        description="Whether immediate medical care is required")
+    educational_insights: str = Field(
+        description="Relevant medical education for the caregiver")
+    professional_consultation_recommended: str = Field(
+        description="Specific areas requiring professional input")
+    safety_warnings: str = Field(
+        description="Important safety considerations and contraindications")
 
 #### CLASSIFICATION STRUCTURE ####
 # class GradeQuestion(BaseModel):
@@ -77,15 +109,36 @@ class GradeDocument(BaseModel):
         description="Is the document relevant to the question? If yes -> 'Yes'. If not -> 'No'.")
 
 
+# class RephrasedMessage(BaseModel):
+#     rephrased_message: str = Field("")
+#     asking_about_attachments: bool = Field("")
+
 class RephrasedMessage(BaseModel):
-    rephrased_message: str = Field("")
-    asking_about_attachments: bool = Field("")
+    rewritten_message: str = Field(
+        description="The contextualized standalone message")
+    context_added: str = Field(
+        description="Summary of what context was incorporated")
+    original_intent_preserved: bool = Field(description="True | False")
+
+
+class Classification(BaseModel):
+    #     classification: str = Field("""
+    #     - MEDICAL_COMPLEX: Medical questions, patient-specific queries, health concerns, symptoms, treatments, diagnoses
+    #     - SIMPLE_GENERAL: Greetings, general conversation, non-medical questions, system queries
+    #     - FILE_RELATED: Questions about uploaded files, requests to analyze documents, references to specific files
+    # """)
+    classification: str = Field(
+        description="Classification of the user's message")
+    has_files: bool = Field(
+        description="Does the user's message contain attachments?")
+    reasoning: str = Field(description="Reason for classification")
 
 #### GRAPH STATE ####
 
 
 class UserMessageState(MessagesState):
-    document_context: Annotated[List[Document], operator.add]  # Any
+    # document_context: Annotated[List[Document], operator.add]  # Any
+    document_context: str
     retrieved_docs: Annotated[List[Document], operator.add]
     analysis: MedicalAnalysis
     previous_user_message: str
@@ -93,6 +146,7 @@ class UserMessageState(MessagesState):
     rephrase_count: int
     proceed: bool
     asking_about_attachments: bool
+    latest_attachments: List[Document]  # override with latest attachments
 
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -127,11 +181,19 @@ async def on_chat_start():
         # state["retrieved_docs"] = []
         state["rephrased_question"] = ""
         state["proceed"] = False
-        # TODO check if user message is about an attached file
+        # # Extract the last user message (prior to current) if needed.
+        previous_user_message = next(
+            (m.content for m in reversed(
+                state["messages"][:-1]) if isinstance(m, HumanMessage)),
+            ""
+        )
 
         # if len(state["messages"]) > 1:
         conversation = state["messages"][:-1]
         current_question = state["messages"][-1]
+
+        latest_docs = cl.user_session.get("latest_attached_docs", [])
+        latest_context = cl.user_session.get("document_context", [])
         document_context = state.get("document_context", None)
 
         rephrase_prompt = ChatPromptTemplate.from_template(
@@ -141,12 +203,15 @@ async def on_chat_start():
             RephrasedMessage)
 
         response = chain.invoke(
-            {"history": conversation, "context": document_context, "message": current_question})
-        better_question = response.rephrased_message.strip()
+            {"history": conversation, "context": document_context, "message": current_question, "previous_user_message": previous_user_message})
+        better_question = response.rewritten_message.strip()
         print(f"\n\nrewriter response:\n{response}\n\n")
         return {
             "rephrased_question": better_question,
-            "asking_about_attachments": response.asking_about_attachments
+            "retrieved_docs": latest_docs,
+            "document_context": latest_context
+            # "asking_about_attachments": response.asking_about_attachments
+            # "asking_about_attachments": response.asking_about_attachments
         }
 
     # node 1 - classifier node
@@ -155,47 +220,61 @@ async def on_chat_start():
         print(
             f"\nRephrased question: {state.get("rephrased_question", None)}\n")
 
-        message = state["messages"][-1]
-        rephrased_message = state.get("rephrased_question", message.content)
+        # # Extract the last user message (prior to current) if needed.
+        previous_user_message = next(
+            (m.content for m in reversed(
+                state["messages"][:-1]) if isinstance(m, HumanMessage)),
+            ""
+        )
+
+        # if len(state["messages"]) > 1:
+        conversation = state["messages"][:-1]
+        current_question = state["messages"][-1]
+        document_context = state.get("document_context", None)
+        rephrased_message = state.get(
+            "rephrased_question", current_question.content)
+
+        print(
+            f"\n\ncurrent question: {current_question}\ncontext:{document_context}\nmessage: {rephrased_message}\nprevious msg: {previous_user_message}\nhistory: {conversation[:200]}")
 
         prompt = ChatPromptTemplate.from_template(
             MSG_CLASSIFIER_PROMPT_TEMPLATE)
 
-        chain = prompt | msg_classifier_llm
-        result = chain.invoke({"message": rephrased_message}
-                              ).content.strip().lower()
+        chain = prompt | msg_classifier_llm.with_structured_output(
+            Classification)
+        # result = chain.invoke({"history": conversation, "context": document_context, "message": rephrased_message, "previous_user_message": previous_user_message}
+        #                       )
+
+        result = chain.invoke({"message": rephrased_message, "previous_user_message": previous_user_message}
+                              )
 
         print(f"\n\nclassify output:\n {result}\n\n")
-        return result
+        return result.classification
 
     # node 1a - RAG node
 
     async def retrieve_docs(state: UserMessageState):
         print(f"\n-----retrieve_docs()-----\n")
         # add all med docs to context
-        # if # docs in context < # docs in DB -> retrieve missing docs and update `retrieved_docs`, `document_context``
         # else continue to analyze node
         message = state["messages"][-1]
         rephrased_message = state.get("rephrased_question", message.content)
         updated_document_context = []
 
-        if state.get('asking_about_attachments', False):
-            print(f"\n\nuser is asking about attachments\n\n")
-            if cl.user_session.get('has_attachments', False):
-                print(f"\n\nfound attached files\n\n")
-                updated_document_context = cl.user_session.get(
-                    'latest_attached_docs', []) + state.get('document_context', [])
-            else:
-                print(f"\n\nno files attached\n\n")
-                pass
-                # TODO return "please upload files that you have questions about"
+        # if state.get('asking_about_attachments', False):
+        print(f"\n\nuser is asking about attachments\n\n")
+        if cl.user_session.get('has_attachments', False):
+            print(f"\n\nFound attached files\n\n")
+            updated_document_context = cl.user_session.get(
+                'latest_attached_docs', []) + state.get('retrieved_docs', [])
         else:
-            print(
-                f"\n\nuser is NOT asking about attachments. Retrieving all patient data...\n\n")
+            print(f"\n\nNo files attached. Fetching all...\n\n")
             updated_document_context = await get_all_patient_docs()
+            # TODO return "please upload files that you have questions about"
         return {
-            # "retrieved_docs": updated_document_context,
-            "document_context": updated_document_context
+            "document_context": updated_document_context,
+            "latest_attachments": cl.user_session.get(
+                'latest_attached_docs', [])
         }
 
     # node 2a - researcher node
@@ -225,15 +304,15 @@ async def on_chat_start():
         prompt = ChatPromptTemplate.from_template(
             CONVERSATIONAL_ANALYSIS_SYSTEM_PROMPT)
 
-        # chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
-        chain = prompt | analysis_llm | StrOutputParser()
+        chain = prompt | analysis_llm.with_structured_output(MedicalAnalysis)
+        # chain = prompt | analysis_llm | StrOutputParser()
         response = chain.invoke(
             {"message": message.content, "context": document_context, "history": messages, "previous_user_message": previous_user_message})
 
         pprint.pprint(f"\n\nanalyze() output:\n{response}\n\n")
 
-        # return {"analysis": response}
-        return {"messages": [AIMessage(content=response)]}
+        return {"analysis": response}
+        # return {"messages": [AIMessage(content=response)]}
 
     # node 1b - default generator node
 
@@ -242,6 +321,7 @@ async def on_chat_start():
         conversation = state["messages"][:-1]
         message = state["messages"][-1]
         analysis = state.get("analysis", None)
+        document_context = state.get("document_context", None)
 
         # Retrieve the full chat history as a text block.
         # chat_history_text = "\n".join(
@@ -259,8 +339,9 @@ async def on_chat_start():
             CONVERSATIONAL_FORMATTER_PROMPT)
         inputs = {
             "previous_user_message": previous_user_message,
-            "chat_history": conversation,
+            "history": conversation,
             "message": message.content,
+            "context": document_context,
             # can be None or partial; template will handle if not present.
             "analysis": analysis
         }
@@ -282,15 +363,16 @@ async def on_chat_start():
     workflow.add_edge(START, "question_rewriter")
     workflow.add_conditional_edges("question_rewriter", classify_message, {
         # If medical question, use RAG and medical analysis
-        "file": "retrieve_docs",
+        "FILE_RELATED": "retrieve_docs",
+        # "FILE_RELATED": "retrieve_docs",
         # Otherwise use general model completion
-        "medical": "analyze",
-        "general": "generate"
+        "MEDICAL_COMPLEX": "analyze",
+        "SIMPLE_GENERAL": "generate"
     })
 
     workflow.add_edge("retrieve_docs", "analyze")
-    # workflow.add_edge("analyze", "generate")
-    workflow.add_edge("analyze", END)
+    workflow.add_edge("analyze", "generate")
+    # workflow.add_edge("analyze", END)
     workflow.add_edge("generate", END)
 
     # Add memory
@@ -313,9 +395,14 @@ async def on_message(message: cl.Message):
     # If files are attached, process them first
     if attached_files:
         cl.user_session.set('has_attachments', True)
-        extracted_docs, extracted_filenames = await extract_docs_from_files(attached_files)
+        # extracted_docs, extracted_filenames = await extract_docs_from_files(attached_files)
+        # extracted_filenames = []
+        extracted_docs, formatted_context = await extract_docs_from_files(
+            attached_files)
+        cl.user_session.set("latest_attached_docs", extracted_docs)
+        cl.user_session.set("document_context", formatted_context)
         asyncio.create_task(add_files_to_db(
-            extracted_docs, extracted_filenames))
+            extracted_docs))
         # await add_files_to_db(attached_files)
     else:
         cl.user_session.set('has_attachments', False)
@@ -338,7 +425,9 @@ async def on_message(message: cl.Message):
         if (
             msg.content
             and isinstance(msg, AIMessageChunk)
-            and (metadata["langgraph_node"] in ["generate", "analyze"])
+            and (metadata["langgraph_node"] in ["generate",
+                                                #  "analyze"
+                                                ])
         ):
 
             await answer.stream_token(msg.content)
