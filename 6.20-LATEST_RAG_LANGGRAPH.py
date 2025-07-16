@@ -420,7 +420,8 @@ async def on_message(message: cl.Message):
         {"messages": [HumanMessage(content=message.content)]},
 
         config,
-        stream_mode="messages",
+        # stream_mode="messages",
+        stream_mode="updates"
     ):
         if (
             msg.content
