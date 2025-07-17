@@ -138,7 +138,9 @@ async def on_message(message: cl.Message):
 
         answer = cl.Message(content="")
         response_started = False
-        seen_message_ids = cast(set, cl.user_session.get("seen_message_ids", set()))  # Track messages we've already processed
+        # Track messages we've already processed
+        seen_message_ids = cast(
+            set, cl.user_session.get("seen_message_ids", set()))
 
         async for chunk in app.astream(
             {"messages": [{"role": "user", "content": message.content}],
@@ -155,8 +157,8 @@ async def on_message(message: cl.Message):
                             continue  # Skip already processed messages
 
                         seen_message_ids.add(msg.id)
-                        cl.user_session.set("seen_message_ids", seen_message_ids)
-
+                        cl.user_session.set(
+                            "seen_message_ids", seen_message_ids)
 
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
                             print(f"🔧 Tool Call: {msg.tool_calls[0]['name']}")
@@ -211,8 +213,11 @@ async def on_message(message: cl.Message):
 
         answer = cl.Message(content="")
         response_started = False
-        seen_message_ids = cast(set, cl.user_session.get("seen_message_ids", set()))  # Track messages we've already processed
-        
+        # Track messages we've already processed
+        seen_message_ids = cast(
+            set, cl.user_session.get("seen_message_ids", set()))
+        active_tool_steps = {}  # Track active tool steps by tool call ID
+
         async for update in app.astream(
             {"messages": [{"role": "user", "content": message.content}],
              "document_context": document_context,
@@ -226,54 +231,72 @@ async def on_message(message: cl.Message):
             for node_name, node_data in update.items():
                 print(f"\n🔄 Processing node: {node_name}")
 
+                # Create a step for each node
+                step_name = node_name.replace("_", " ").title()
+                if node_name == "supervisor":
+                    step_name = "🎯 Supervisor Analysis"
+                elif node_name == "research_agent":
+                    step_name = "🔍 Research Agent"
+                elif "tool" in node_name.lower():
+                    step_name = f"🛠️ {step_name}"
+                else:
+                    step_name = f"⚙️ {step_name}"
+
                 # Check if there are messages in this update
                 if "messages" in node_data and node_data["messages"]:
                     # Only process the NEW messages (typically the last one in the list)
                     messages = node_data["messages"]
-                    
+
                     # Process only new messages we haven't seen before
                     for msg in messages:
-                        print(f"� New message type: {type(msg).__name__}")
+                        print(f"📨 New message type: {type(msg).__name__}")
+                        if msg.id in seen_message_ids:
+                            continue  # Skip already processed messages
 
+                        seen_message_ids.add(msg.id)
                         # Handle tool calls
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                            tool_name = msg.tool_calls[0].get('name', 'Unknown')
+                            tool_call = msg.tool_calls[0]
+                            tool_name = tool_call.get('name', 'Unknown')
+                            tool_args = tool_call.get('args', {})
+                            tool_call_id = tool_call.get(
+                                'id', f"{tool_name}_{len(active_tool_steps)}")
                             print(f"🔧 Tool Call: {tool_name}")
 
-                            # Show tool usage to user
-                            tool_msg = f"🔧 Using tool: **{tool_name}**\n"
-                            await cl.Message(content=tool_msg).send()
-                        
+                            # Create a step for tool usage
+                            step = cl.Step(name=f"🔧 {tool_name}")
+                            await step.__aenter__()
+
+                            step.output = f"Executing tool: **{tool_name}**"
+                            if tool_args:
+                                # Format tool arguments nicely
+                                args_str = ", ".join([f"{k}: {str(v)[:50]}..." if len(str(v)) > 50 else f"{k}: {v}"
+                                                      for k, v in tool_args.items()])
+                                step.output += f"\n\nArguments: {args_str}"
+
+                            # Store the step reference to update it later with results
+                            active_tool_steps[tool_call_id] = step
+
                         # Handle AI message content - stream it properly
                         elif (hasattr(msg, 'content') and msg.content):
                             if isinstance(msg, (AIMessage, AIMessageChunk)):
                                 print(f"💬 AI Content: {msg.content[:100]}...")
 
                                 # Check if this is a final response from supervisor
-                                if (node_name == "supervisor" and 
-                                    isinstance(msg, AIMessage)):
-                                    # Create a unique identifier for the message
-                                    # msg_id = id(msg)
-                                    print(f"message ID: {msg.id}")
-                                    print(f"seen_message_ids: {seen_message_ids}")
-                                    if msg.id in seen_message_ids:
-                                        print(f"message ID {msg.id} already seen, skipping...")
-                                        continue  # Skip already processed messages
+                                if (node_name == "supervisor" and
+                                        isinstance(msg, AIMessage)):
 
-                                    seen_message_ids.add(msg.id)
+                                    cl.user_session.set(
+                                        "seen_message_ids", seen_message_ids)
 
-
-                                    cl.user_session.set("seen_message_ids", seen_message_ids)
-                                    print(f"seen_message_ids: {seen_message_ids}")
-                                    print(f"message ID: {msg.id}")
                                     if not response_started:
                                         response_started = True
                                         answer = cl.Message(content="")
-                                    
-                                    # Stream the content character by character for smooth streaming
+
+                                    # MANUAL STREAMING the content character by character for smooth streaming
                                     content = msg.content
                                     chunk_size = 5  # Stream in small chunks for smooth effect
-                                    
+
                                     for i in range(0, len(content), chunk_size):
                                         chunk = content[i:i + chunk_size]
                                         await answer.stream_token(chunk)
@@ -281,13 +304,37 @@ async def on_message(message: cl.Message):
                                         await asyncio.sleep(0.01)
 
                             if isinstance(msg, (HumanMessage)):
-                                print(f"💬 Human Content: {msg.content[:100]}...")
-                            
+                                print(
+                                    f"💬 Human Content: {msg.content[:100]}...")
+
                             # Handle tool message results
                             elif isinstance(msg, ToolMessage):
-                                print(f"🛠️ Tool Result: {str(msg.content)[:100]}...")
-                                # Optionally show brief tool results
-                                # await cl.Message(content=f"📊 Tool completed").send()
+                                print(
+                                    f"🛠️ Tool Result: {str(msg.content)[:100]}...")
+
+                                # Find the corresponding tool step and update it with results
+                                tool_call_id = getattr(
+                                    msg, 'tool_call_id', None)
+                                if tool_call_id and tool_call_id in active_tool_steps:
+                                    step = active_tool_steps[tool_call_id]
+                                    result_content = str(msg.content)
+
+                                    # Update the existing step with the result
+                                    if len(result_content) > 300:
+                                        step.output += f"\n\n**Result**: {result_content[:300]}..."
+                                    else:
+                                        step.output += f"\n\n**Result**: {result_content}"
+
+                                    # Close the step and remove from active steps
+                                    await step.__aexit__(None, None, None)
+                                    del active_tool_steps[tool_call_id]
+                                else:
+                                    # Fallback: create a separate step if we can't find the matching tool call
+                                    async with cl.Step(name="📊 Tool Results") as step:
+                                        if len(result_content) > 300:
+                                            step.output = f"**Result**: {result_content[:300]}..."
+                                        else:
+                                            step.output = f"**Result**: {result_content}"
 
                 print("-" * 30)
 
