@@ -39,7 +39,7 @@ memory = InMemorySaver()
 
 load_dotenv()
 
-default_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=True)
+default_llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
 
 
 def generation_prompt(state: State, config: RunnableConfig) -> list[AnyMessage]:
@@ -138,6 +138,7 @@ async def on_message(message: cl.Message):
 
         answer = cl.Message(content="")
         response_started = False
+        seen_message_ids = cast(set, cl.user_session.get("seen_message_ids", set()))  # Track messages we've already processed
 
         async for chunk in app.astream(
             {"messages": [{"role": "user", "content": message.content}],
@@ -150,6 +151,13 @@ async def on_message(message: cl.Message):
                 print(f"\n🔄 Node: {node_name}")
                 if "messages" in node_output:
                     for msg in node_output["messages"]:
+                        if msg.id in seen_message_ids:
+                            continue  # Skip already processed messages
+
+                        seen_message_ids.add(msg.id)
+                        cl.user_session.set("seen_message_ids", seen_message_ids)
+
+
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
                             print(f"🔧 Tool Call: {msg.tool_calls[0]['name']}")
                             print(f"📝 Arguments: {msg.tool_calls[0]['args']}")
@@ -196,5 +204,99 @@ async def on_message(message: cl.Message):
             await answer.stream_token(token.content)
         await answer.update()
 
+    async def stream_updates():
+        """Stream each update from the graph execution to the user."""
+        print("🤖 Starting stream with updates mode...")
+        print("=" * 50)
+
+        answer = cl.Message(content="")
+        response_started = False
+        seen_message_ids = cast(set, cl.user_session.get("seen_message_ids", set()))  # Track messages we've already processed
+        
+        async for update in app.astream(
+            {"messages": [{"role": "user", "content": message.content}],
+             "document_context": document_context,
+             },
+            config,
+            stream_mode="updates"
+        ):
+            print(f"\n📦 Update received: {update}")
+
+            # Process each node update
+            for node_name, node_data in update.items():
+                print(f"\n🔄 Processing node: {node_name}")
+
+                # Check if there are messages in this update
+                if "messages" in node_data and node_data["messages"]:
+                    # Only process the NEW messages (typically the last one in the list)
+                    messages = node_data["messages"]
+                    
+                    # Process only new messages we haven't seen before
+                    for msg in messages:
+                        print(f"� New message type: {type(msg).__name__}")
+
+                        # Handle tool calls
+                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            tool_name = msg.tool_calls[0].get('name', 'Unknown')
+                            print(f"🔧 Tool Call: {tool_name}")
+
+                            # Show tool usage to user
+                            tool_msg = f"🔧 Using tool: **{tool_name}**\n"
+                            await cl.Message(content=tool_msg).send()
+                        
+                        # Handle AI message content - stream it properly
+                        elif (hasattr(msg, 'content') and msg.content):
+                            if isinstance(msg, (AIMessage, AIMessageChunk)):
+                                print(f"💬 AI Content: {msg.content[:100]}...")
+
+                                # Check if this is a final response from supervisor
+                                if (node_name == "supervisor" and 
+                                    isinstance(msg, AIMessage)):
+                                    # Create a unique identifier for the message
+                                    # msg_id = id(msg)
+                                    print(f"message ID: {msg.id}")
+                                    print(f"seen_message_ids: {seen_message_ids}")
+                                    if msg.id in seen_message_ids:
+                                        print(f"message ID {msg.id} already seen, skipping...")
+                                        continue  # Skip already processed messages
+
+                                    seen_message_ids.add(msg.id)
+
+
+                                    cl.user_session.set("seen_message_ids", seen_message_ids)
+                                    print(f"seen_message_ids: {seen_message_ids}")
+                                    print(f"message ID: {msg.id}")
+                                    if not response_started:
+                                        response_started = True
+                                        answer = cl.Message(content="")
+                                    
+                                    # Stream the content character by character for smooth streaming
+                                    content = msg.content
+                                    chunk_size = 5  # Stream in small chunks for smooth effect
+                                    
+                                    for i in range(0, len(content), chunk_size):
+                                        chunk = content[i:i + chunk_size]
+                                        await answer.stream_token(chunk)
+                                        # Small delay for smoother streaming effect
+                                        await asyncio.sleep(0.01)
+
+                            if isinstance(msg, (HumanMessage)):
+                                print(f"💬 Human Content: {msg.content[:100]}...")
+                            
+                            # Handle tool message results
+                            elif isinstance(msg, ToolMessage):
+                                print(f"🛠️ Tool Result: {str(msg.content)[:100]}...")
+                                # Optionally show brief tool results
+                                # await cl.Message(content=f"📊 Tool completed").send()
+
+                print("-" * 30)
+
+        # Finalize the response
+        if response_started:
+            await answer.update()
+        else:
+            await cl.Message(content="No response was generated.").send()
+
     # await stream_formatted()
-    await stream_messages()
+    # await stream_messages()
+    await stream_updates()
