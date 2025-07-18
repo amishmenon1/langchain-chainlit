@@ -17,3 +17,5 @@ google-adk
 langgraph
 langchain-docling
 ipython
+langchain-anthropic
+langchain_google_genai

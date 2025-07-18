@@ -254,8 +254,6 @@ async def on_message(message: cl.Message):
                             continue  # Skip already processed messages
 
                         seen_message_ids.add(msg.id)
-                        cl.user_session.set(
-                            "seen_message_ids", seen_message_ids)
                         # Handle tool calls
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
                             tool_call = msg.tool_calls[0]
@@ -287,6 +285,9 @@ async def on_message(message: cl.Message):
                                 # Check if this is a final response from team
                                 if (node_name == "team" and
                                         isinstance(msg, AIMessage)):
+
+                                    cl.user_session.set(
+                                        "seen_message_ids", seen_message_ids)
 
                                     if not response_started:
                                         response_started = True

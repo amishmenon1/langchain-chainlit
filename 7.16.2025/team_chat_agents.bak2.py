@@ -10,30 +10,26 @@ from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, AIMessa
 from langchain.schema.runnable import Runnable
 from langchain.schema.runnable.config import RunnableConfig
 from typing import cast, List, Optional
-from typing import AsyncGenerator
 
 from langchain_tavily import TavilySearch
 from langgraph.checkpoint.memory import MemorySaver, InMemorySaver
 from torch import chunk
 from templates.agent_prompts.analysis import ANALYSIS_PROMPT
-from templates.agent_prompts.generation import ENHANCED_GENERATE, SUPERVISOR_PROMPT, SUPERVISOR_PROMPT2
+from templates.agent_prompts.generation import GENERATION_PROMPT, SUPERVISOR_PROMPT, SUPERVISOR_PROMPT2
 from templates.agent_prompts.research import RESEARCH_PROMPT
 import chainlit as cl
 import asyncio
 from langgraph.prebuilt.chat_agent_executor import AgentState
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
-from langchain_core.runnables import Runnable
 from agents.research_agent.state import State
 from agents.research_agent.graph import graph as research_agent
 # from rag_agent import graph as rag_agent
 import rag_workflow
-from langchain.prompts import ChatPromptTemplate
 
 import logging
 from langgraph.prebuilt import tools_condition
 from langchain_anthropic import ChatAnthropic
-from langchain.schema import StrOutputParser
 
 
 # Setup logging
@@ -47,17 +43,17 @@ memory = InMemorySaver()
 load_dotenv()
 
 openai_llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
-gemini_llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
-# claude_llm = ChatAnthropic(
-#     model="claude-sonnet-4-20250514",
-#     temperature=0,
-#     max_tokens=1024,
-#     timeout=None,
-#     max_retries=2,
-#     streaming=True
-# )
+claude_llm = ChatAnthropic(
+    # model="claude-opus-4-20250514",
+    model="claude-sonnet-4-20250514",
+    temperature=0,
+    max_tokens=1024,
+    timeout=None,
+    max_retries=2,
+    streaming=True
+)
 
-default_llm = openai_llm
+default_llm = claude_llm
 
 
 def generation_prompt(state: State, config: RunnableConfig) -> list[AnyMessage]:
@@ -78,103 +74,22 @@ async def on_chat_start():
     """Initialize the chat with a welcome message."""
     ###### AGENTS ######
 
-    # -- Node 1: Stream from OpenAI --
-    def stream_from_openai() -> Runnable:
-        async def node(state: State) -> AsyncGenerator:
-            answer = cl.Message(content="")
-            print("🤖 Starting stream from OpenAI...")
-            # user_input = state["messages"][-1].content
-            # messages = [{"role": "user", "content": user_input}]
-
-            document_context = state.get("document_context", [])
-            analysis = state.get("analysis", None)
-            # Clean up any messages with invalid names before passing to OpenAI
-            message_history = state.get("messages", [])
-            sys_msg = SUPERVISOR_PROMPT2.format(
-                document_context=document_context, analysis=analysis)
-            messages = [
-                {"role": "system", "content": sys_msg}, *message_history]
-            async for chunk in openai_llm.astream(messages):
-                await answer.stream_token(chunk.text())
-            await answer.update()
-        return cast(Runnable, node)
-
-    # -- Node 2: Supervisor subgraph --
-    med_team = create_supervisor(
+    supervisor = create_supervisor(
         model=default_llm,
-        supervisor_name="team",
         agents=[research_agent],
         state_schema=State,
         prompt=generation_prompt,
+        # prompt="You are a helpful AI assistant.",
         add_handoff_back_messages=True,
         output_mode="last_message",
-    ).compile(checkpointer=memory)
 
-    # -- Node 3: Stream from Gemini --
-    def stream_from_gemini() -> Runnable:
-        async def node(state: State) -> AsyncGenerator:
-            answer = cl.Message(content="")
-            print("🤖 Starting stream from Gemini...")
-            message = state["messages"][-1].content
-            # print(f"User input: {user_input}")
-            # messages = [{"role": "user", "content": user_input}]
-            # document_context = state.get("document_context", [])
-            # analysis = state.get("analysis", None)
-            # # Clean up any messages with invalid names before passing to OpenAI
-            # message_history = state.get("messages", [])
-            # last_message = state["messages"][-1]
-            # sys_msg = ENHANCED_GENERATE.format(
-            #     document_context=document_context, analysis=analysis)
-            # messages = [
-            #     {"role": "system", "content": sys_msg}, *message_history]
-
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    (
-                        "system",
-                        ENHANCED_GENERATE.format(document_context=state.get(
-                            "document_context", []), analysis=state.get("analysis", None))
-                    ),
-                    ("human", "{message}"),
-                ]
-            )
-            llm = prompt | gemini_llm | StrOutputParser()
-            async for chunk in llm.astream({"message": message}):
-                # yield {"messages": [AIMessageChunk(content=chunk.text())]}
-                print(f"Gemini chunk: {chunk}")
-                await answer.stream_token(chunk)
-            await answer.update()
-        return cast(Runnable, node)
-
-    # -- Classifier Edge Logic --
-    def classify_message(state: State) -> str:
-        user_input = state["messages"][-1].content.lower()
-        # if any(term in user_input for term in ["health", "lab", "blood", "scan", "diagnosis", "medical", "doctor", "symptoms"]):
-        return "analyze"
-        # return "generate"
-
-    # -- Assemble Graph --
-    graph = StateGraph(State)
-    graph.add_node("generate", stream_from_openai())
-    graph.add_node("team", med_team)
-    graph.add_node("generate_enhanced", stream_from_gemini())
-
-    graph.add_conditional_edges(START, classify_message, {
-        "generate": "generate",
-        "analyze": "team"
-    })
-    graph.add_edge("generate", END)
-    # graph.add_edge("team", "generate_enhanced")
-    graph.add_edge("team", END)
-    # graph.add_edge("generate_enhanced", END)
-
-    compiled_graph: CompiledStateGraph = graph.compile(checkpointer=memory)
+    )
 
     await cl.Message(
         content="Welcome to the team chat! How can I assist you today?"
     ).send()
 
-    cl.user_session.set("app", compiled_graph)
+    cl.user_session.set("app", supervisor.compile(checkpointer=memory))
 
 
 @cl.on_message
@@ -189,6 +104,7 @@ async def on_message(message: cl.Message):
 
     # If files are attached, process them first
     if attached_files:
+        cl.user_session.set('has_attachments', True)
         existing_document_context = cl.user_session.get("document_context", [])
         existing_filenames = cl.user_session.get('filenames', [])
         new_files = [
@@ -201,22 +117,30 @@ async def on_message(message: cl.Message):
             cl.user_session.set("document_context", existing_document_context)
             cl.user_session.set('filenames', existing_filenames)
 
+    else:
+        cl.user_session.set('has_attachments', False)
+        cl.user_session.set('latest_attached_docs', None)
+
     app = cast(CompiledStateGraph, cl.user_session.get("app"))
     config: RunnableConfig = {
         "configurable": {"thread_id": cl.context.session.thread_id},
     }
     document_context = cl.user_session.get("document_context", [])
+    if document_context is None:
+        document_context = []
 
     async def stream_updates():
         """Stream each update from the graph execution to the user."""
         print("🤖 Starting stream with updates mode...")
         print("=" * 50)
 
+        answer = cl.Message(content="")
+        response_started = False
         # Track messages we've already processed
         seen_message_ids = cast(
             set, cl.user_session.get("seen_message_ids", set()))
         active_tool_steps = {}  # Track active tool steps by tool call ID
-        response_started = False
+
         async for update in app.astream(
             {"messages": [{"role": "user", "content": message.content}],
              "document_context": document_context,
@@ -228,13 +152,12 @@ async def on_message(message: cl.Message):
 
             # Process each node update
             for node_name, node_data in update.items():
-                print(f"\n🔄 Processing node: {node_name}\n\n")
-                print(f"\n🔄  node data: {node_data}")
+                print(f"\n🔄 Processing node: {node_name}")
 
                 # Create a step for each node
                 step_name = node_name.replace("_", " ").title()
-                if node_name == "team":
-                    step_name = "🎯 Analysis Team"
+                if node_name == "supervisor":
+                    step_name = "🎯 Supervisor Analysis"
                 elif node_name == "research_agent":
                     step_name = "🔍 Research Agent"
                 elif "tool" in node_name.lower():
@@ -243,7 +166,7 @@ async def on_message(message: cl.Message):
                     step_name = f"⚙️ {step_name}"
 
                 # Check if there are messages in this update
-                if node_data and "messages" in node_data and node_data["messages"]:
+                if "messages" in node_data and node_data["messages"]:
                     # Only process the NEW messages (typically the last one in the list)
                     messages = node_data["messages"]
 
@@ -254,8 +177,6 @@ async def on_message(message: cl.Message):
                             continue  # Skip already processed messages
 
                         seen_message_ids.add(msg.id)
-                        cl.user_session.set(
-                            "seen_message_ids", seen_message_ids)
                         # Handle tool calls
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
                             tool_call = msg.tool_calls[0]
@@ -284,16 +205,19 @@ async def on_message(message: cl.Message):
                             if isinstance(msg, (AIMessage, AIMessageChunk)):
                                 print(f"💬 AI Content: {msg.content[:100]}...")
 
-                                # Check if this is a final response from team
-                                if (node_name == "team" and
+                                # Check if this is a final response from supervisor
+                                if (node_name == "supervisor" and
                                         isinstance(msg, AIMessage)):
+
+                                    cl.user_session.set(
+                                        "seen_message_ids", seen_message_ids)
 
                                     if not response_started:
                                         response_started = True
                                         answer = cl.Message(content="")
 
                                     # STREAM DOESNT WORK
-                                    await answer.stream_token(msg.content)
+                                    await answer.stream_token(msg.content[0]["text"])
 
                             if isinstance(msg, (HumanMessage)):
                                 print(
@@ -329,6 +253,7 @@ async def on_message(message: cl.Message):
                                             step.output = f"**Result**: {result_content}"
 
                 print("-" * 30)
+
         # Finalize the response
         if response_started:
             await answer.update()
