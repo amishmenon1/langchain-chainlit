@@ -21,9 +21,15 @@ simple_llm = ChatOpenAI(model="gpt-4o")
 llm_with_tools = simple_llm.bind_tools(TOOLS)
 memory = InMemorySaver()
 
+
+# TODO create internal custom state AnalysisAgentState - optimized_query (str)
+
+### DEFINE STATES ###
+
 ### DEFINE AGENT NODE ###
 
 
+# TODO move to prompts.py
 # System message
 assistant_system_message = SystemMessage(content=("""
 You are a professional financial assistant specializing in stock market analysis and investment strategies. 
@@ -57,10 +63,10 @@ Your goal is to help users make informed financial decisions quickly and confide
 def optimize_request(state: MessagesState):
     """Optimize the request for the analysis agent."""
     print("\n\nNode - Optimize request...\n\n")
-    # TODO return optimized_query (str - should exist on internal graph state)
+    # TODO return {"optimized_query":optimized_query} (str - should exist on internal graph state)
     pass
 
-# TODO create internal custom state AnalysisAgentState - optimized_query (str)
+
 # TODO ONLY return structured output MedicalAnalysis to parent graph's generate_answer
 
 
