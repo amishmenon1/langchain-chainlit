@@ -15,6 +15,7 @@ import operator
 from pydantic import BaseModel, Field
 
 
+@dataclass
 class MedicalAnalysis(BaseModel):
     """
     Structured output model for the Analyzer Agent in a medical assistant chatbot system.
@@ -92,8 +93,8 @@ class State(AgentState):
 
     # Additional attributes can be added here as needed.
     document_context: Annotated[str, {
-        "description": "Contextual information from documents"}] = field(default="")
-    analysis: MedicalAnalysis = field(default=None)
+        "description": "Contextual information from documents"}] = field(default_factory=list)
+    analysis: MedicalAnalysis = field(default_factory=MedicalAnalysis)
 
     # retrieved_documents: List[Document] = field(default_factory=list)
     # extracted_entities: Dict[str, Any] = field(default_factory=dict)

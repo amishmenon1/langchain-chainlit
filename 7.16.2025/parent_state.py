@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence, List, Any
+from typing import Sequence, List, Any, Literal
 
 from langchain_core.messages import AnyMessage
 from langchain.schema import Document
@@ -11,8 +11,31 @@ from langgraph.graph import add_messages
 from langgraph.managed import IsLastStep
 from typing_extensions import Annotated
 from langgraph.prebuilt.chat_agent_executor import AgentState
+from langgraph.graph import MessagesState
 import operator
 from pydantic import BaseModel, Field
+
+
+@dataclass
+class RewrittenMessage(BaseModel):
+    """
+    Represents a rewritten message with its original content and the reason for rewriting.
+    This is used to track changes made to messages during processing.
+    """
+    rewritten_message: str = Field(
+        description="The contextualized standalone message.")
+    context_added: str = Field(
+        description="Summary of what context was incorporated.")
+    original_intent_preserved: bool = Field(
+        description="Whether the original intent of the message was preserved.")
+
+
+@dataclass
+class Classification(BaseModel):
+    classification: Literal['MEDICAL', 'GENERAL', 'MISCELLANEOUS'] = Field(
+        description="Classification of the user's query, used to determine the route of the graph flow"
+    )
+    reasoning: str = Field(description="Reason for classification")
 
 
 @dataclass
@@ -47,3 +70,33 @@ class MedicalAnalysis(BaseModel):
     safety_warnings: str = Field(
         description="Critical safety notes, contraindications, or activities/treatments to avoid for patient safety."
     )
+
+
+@dataclass
+class ParentGraphState(MessagesState):
+    """State for the parent graph, containing messages and additional context."""
+
+# # 'MEDICAL', 'FILES', 'GENERAL', 'UNKNOWN', 'MULTIPLE'
+#     classification: Literal['MEDICAL_COMPLEX', 'SIMPLE_GENERAL', 'FILE_RELATED'] = Field(
+#         description="Classification of the user's query, used to determine the route of the graph flow"
+#     )
+    rewritten_message: RewrittenMessage = Field(
+        description="Rewritten message with context and intent preservation")
+    classification: Classification = Field(
+        description="Classification of the user's query, used to determine the route of the graph flow"
+    )
+    has_files: bool = Field(
+        default=False,
+        description="Indicates whether the user has uploaded files with their message."
+    )
+    analysis: MedicalAnalysis = Field(
+        description="Analysis results"
+    )
+    attached_files: Annotated[List[Document], {
+        "description": "List of files attached by the user"}] = field(default_factory=list)
+    retrieved_documents: Annotated[List[Document], {
+        "description": "List of retrieved documents"}] = field(default_factory=list)
+    document_context: Annotated[str, {
+        "description": "Contextual information from documents"}] = ""
+    research_context: Annotated[str, {
+        "description": "Contextual information from research"}] = ""

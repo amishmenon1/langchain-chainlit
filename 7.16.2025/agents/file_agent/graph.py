@@ -7,23 +7,19 @@ Works with a chat model with tool calling support.
 from IPython.display import Image, display
 from langgraph.prebuilt import ToolNode
 from langgraph.prebuilt import tools_condition
-from langgraph.graph import START, END, StateGraph
+from langgraph.graph import START, StateGraph
 from langgraph.graph import MessagesState
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from agents.analysis_agent.tools import TOOLS
-from agents.analysis_agent.state import MedicalAnalysis, State
-from agents.analysis_agent.prompts import ANALYSIS_SYSTEM_PROMPT
+from agents.analysis_agent.state import State
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain.prompts import ChatPromptTemplate
-from typing import cast, Literal
+
 ### DEFINE AGENT TOOLS ###
 # define more custom functions here and use Tool.from_function to create tools
 
 simple_llm = ChatOpenAI(model="gpt-4o")
 llm_with_tools = simple_llm.bind_tools(TOOLS)
-
-
 memory = InMemorySaver()
 
 
@@ -31,8 +27,36 @@ memory = InMemorySaver()
 
 ### DEFINE STATES ###
 
-### DEFINE AGENT NODES ###
+### DEFINE AGENT NODE ###
 
+
+# TODO move to prompts.py
+# System message
+assistant_system_message = SystemMessage(content=("""
+You are a professional financial assistant specializing in stock market analysis and investment strategies. 
+Your role is to analyze stock data and provide **clear, decisive recommendations** that users can act on, 
+whether they already hold the stock or are considering investing.
+
+You have access to a set of tools that can provide the data you need to analyze stocks effectively. 
+Use these tools to gather relevant information such as stock symbols, current prices, historical trends, 
+and key financial indicators. Your goal is to leverage these resources efficiently to generate accurate, 
+actionable insights for the user.
+
+Your responses should be:
+- **Concise and direct**, summarizing only the most critical insights.
+- **Actionable**, offering clear guidance on whether to buy, sell, hold, or wait for better opportunities.
+- **Context-aware**, considering both current holders and potential investors.
+- **Free of speculation**, relying solely on factual data and trends.
+
+### Response Format:
+1. **Recommendation:** Buy, Sell, Hold, or Wait.
+2. **Key Insights:** Highlight critical trends and market factors that influence the decision.
+3. **Suggested Next Steps:** What the user should do based on their current position.
+
+If the user does not specify whether they own the stock, provide recommendations for both potential buyers and current holders. Ensure your advice considers valuation, trends, and market sentiment.
+
+Your goal is to help users make informed financial decisions quickly and confidently.
+"""))
 
 # Node 1
 
@@ -48,57 +72,14 @@ def optimize_request(state: State):
 
 
 def assistant(state: State):
-    """Run the analysis assistant with the provided state."""
     print("\n\nNode - analysis assistant...\n\n")
-    messages = state["messages"]
-    user_message = state["messages"][-1]
-    document_context = state.get("document_context", "")
-    system_msg = ANALYSIS_SYSTEM_PROMPT.format(
-        document_context=document_context, user_message=user_message.content)
-    prompt = ChatPromptTemplate.from_messages(
-        [SystemMessage(content=system_msg)])
-
-    response = cast(
-        AIMessage,
-        llm_with_tools.invoke(
-            [SystemMessage(content=system_msg), *messages]
-        ),
-    )
-
-    print(f"AGENT response: {response}\n\n")
+    response = llm_with_tools.invoke(
+        [assistant_system_message] + state["messages"])
 
     # TODO return MedicalAnalysis object (should exist on parent state)
     return {"messages": [response]}
 
-# Node 2 - Tool Router node
-
-
-def route_model_output(state: State) -> Literal["__end__", "tools"]:
-    """Determine the next node based on the model's output.
-
-    This function checks if the model's last message contains tool calls.
-
-    Args:
-        state (State): The current state of the conversation.
-
-    Returns:
-        str: The name of the next node to call ("__end__" or "tools").
-    """
-
-    last_message = state["messages"][-1]
-    # print(f"\n\nAGENT - Last message: {last_message}\n\n")
-    if not isinstance(last_message, AIMessage):
-        raise ValueError(
-            f"Expected AIMessage in output edges, but got {type(last_message).__name__}"
-        )
-    # If there is no tool call, then we finish
-    if not last_message.tool_calls:
-        print("\n\nAGENT - No tool calls in last message, ending...\n\n")
-        return END
-    # Otherwise we execute the requested actions
-    print("\n\nAGENT - Tool calls found, routing to tools...\n\n")
-    return "tools"
-
+# Node 2 - Tool Node -- defined in the graph edges
 
 ### DEFINE AGENT GRAPH ###
 
