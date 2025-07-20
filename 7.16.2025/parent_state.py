@@ -76,10 +76,14 @@ class MedicalAnalysis(BaseModel):
 class ParentGraphState(MessagesState):
     """State for the parent graph, containing messages and additional context."""
 
-# # 'MEDICAL', 'FILES', 'GENERAL', 'UNKNOWN', 'MULTIPLE'
-#     classification: Literal['MEDICAL_COMPLEX', 'SIMPLE_GENERAL', 'FILE_RELATED'] = Field(
-#         description="Classification of the user's query, used to determine the route of the graph flow"
-#     )
+# OFFLINE SOLUTION ONLY - OLLAMA
+    # classification: Literal['MEDICAL', 'FILE', 'GENERAL', 'MISCELLANEOUS'] = Field(
+    #     description="Classification of the user's query, used to determine the route of the graph flow"
+    # )
+    # rewritten_message: str = Field(
+    #     description="Rewritten message with context and intent preservation")
+
+# ONLINE SOLUTION - OPENAI
     rewritten_message: RewrittenMessage = Field(
         description="Rewritten message with context and intent preservation")
     classification: Classification = Field(

@@ -19,13 +19,13 @@ from langchain.prompts import ChatPromptTemplate
 from typing import cast, Literal
 from langchain_community.llms.ollama import Ollama
 from langchain.chat_models import init_chat_model
+### DEFINE AGENT TOOLS ###
+# define more custom functions here and use Tool.from_function to create tools
 
-
-simple_llm = ChatOpenAI(model="gpt-4o")
-llm_with_tools = simple_llm.bind_tools(TOOLS)
-
+# simple_llm = ChatOpenAI(model="gpt-4o")
 # simple_llm = Ollama(model="llama3.1:8b")
-# simple_llm = init_chat_model(model="llama3.1:8b", model_provider="ollama")
+simple_llm = init_chat_model(model="llama3.1:8b", model_provider="ollama")
+# llm_with_tools = simple_llm.bind_tools(TOOLS)
 
 
 memory = InMemorySaver()
@@ -56,27 +56,18 @@ def assistant(state: State):
     document_context = state.get("document_context", "")
     system_msg = ANALYSIS_SYSTEM_PROMPT.format(
         document_context=document_context, user_message=user_message.content)
-    prompt = ChatPromptTemplate.from_messages(
-        [SystemMessage(content=system_msg)])
 
     response = cast(
         AIMessage,
-        llm_with_tools.invoke(
-            [SystemMessage(content=system_msg), *messages]
+        simple_llm.invoke(
+            [SystemMessage(system_msg), *messages]
         ),
     )
-
-    # response = cast(
-    #     AIMessage,
-    #     simple_llm.invoke(
-    #         [SystemMessage(content=system_msg), *messages]
-    #     ),
-    # )
 
     print(f"AGENT response: {response}\n\n")
 
     # TODO return MedicalAnalysis object (should exist on parent state)
-    return {"messages": [response]}
+    return {"messages": [response.content]}
 
 # Node 2 - Tool Router node
 

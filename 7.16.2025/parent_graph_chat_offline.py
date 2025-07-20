@@ -2,8 +2,7 @@
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
-from agents.analysis_agent.graph import react_graph as analysis_agent_graph
-from agents.file_agent.graph import rag_agent as file_agent_graph
+from agents.analysis_agent.graph_offline import react_graph
 from langchain_community.llms.ollama import Ollama
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,16 +17,19 @@ from langchain_community.tools import TavilySearchResults
 from langchain.schema.runnable.config import RunnableConfig
 
 from langgraph.checkpoint.memory import InMemorySaver
-from parent_prompts import CLASSIFY_MSG_PROMPT, SYSTEM_PROMPT, MSG_REWRITER_SYSTEM_PROMPT
+from parent_prompts_offline import CLASSIFY_MSG_PROMPT, SYSTEM_PROMPT, MSG_REWRITER_SYSTEM_PROMPT
 from parent_state import ParentGraphState, Classification, RewrittenMessage
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 import operator
 from typing import Literal, cast
 import chainlit as cl
+from langchain.chat_models import init_chat_model
 
-llm = ChatOpenAI(model="gpt-4o")
+# llm = ChatOpenAI(model="gpt-4o")
 # llm = Ollama(model="llama3.1:8b")
+llm = init_chat_model(model="llama3.1:8b", model_provider="ollama")
+
 memory = InMemorySaver()
 
 graph = StateGraph(ParentGraphState)
@@ -51,12 +53,14 @@ def rewrite_message(state: ParentGraphState):
     rephrase_prompt = ChatPromptTemplate.from_template(
         MSG_REWRITER_SYSTEM_PROMPT)
 
-    chain = rephrase_prompt | llm.with_structured_output(
-        RewrittenMessage)
+    # chain = rephrase_prompt | llm.with_structured_output(
+    #     RewrittenMessage)
+
+    chain = rephrase_prompt | llm
 
     response = chain.invoke(
         {"history": conversation, "context": document_context, "message": current_question, "previous_user_message": previous_user_message})
-    better_question = response.rewritten_message.strip()
+    better_question = response.content.strip()
     print(f"\n\nrewriter response:\n{response}\n\n")
     return {
         "rewritten_message": better_question,
@@ -75,41 +79,38 @@ def classify_query(state: ParentGraphState):
     )
     has_files = len(state["attached_files"]) > 0
     prompt = ChatPromptTemplate.from_template(CLASSIFY_MSG_PROMPT)
-    chain = prompt | llm.with_structured_output(Classification)
+    # chain = prompt | llm.with_structured_output(Classification)
+    chain = prompt | llm
 
     response = chain.invoke({"message": rewritten_message,
                             "previous_user_message": previous_user_message,
                              "has_files": has_files})
     print(f"\n\nClassification response: {response}\n\n")
-
+    # classification = 'GENERAL'
+    # if hasattr(response.content, 'classification'):
+    #     classification = response.classification
     return {
-        "classification": response
+        "classification": response.content
     }
 
 
-def route_query(state: ParentGraphState) -> Literal["analysis_agent", "file_agent", "generate_answer"]:
+def route_query(state: ParentGraphState) -> Literal["analysis_agent", "generate_answer_offline"]:
     """Route the query based on classification."""
-    classificationState = state.get("classification", None)
-    if classificationState:
-        classification = classificationState.classification
-    else:
-        classification = "GENERAL"
-
+    classification = state["classification"]
     has_files = len(state["attached_files"]) > 0
-
     if has_files:
         print("\n\nRouting to file agent...\n\n")
-        return "file_agent"
+        pass
         # return "file_agent"
     if classification == "GENERAL":
         print("\n\nRouting to generate_answer...\n\n")
-        return "generate_answer"
+        return "generate_answer_offline"
     elif classification == "MEDICAL":
         print("\n\nRouting to analysis_agent...\n\n")
         return "analysis_agent"
     else:
         print("\n\nUnknown classification, routing to generate_answer...\n\n")
-        return "generate_answer"
+        return "generate_answer_offline"
 # TODO update prompt to ask user if they want a deeper analysis
 
 
@@ -133,12 +134,29 @@ def generate_answer(state: ParentGraphState):
     return {"messages": [answer]}
 
 
-def build_graph():
-    graph.add_node("file_agent", file_agent_graph)
-    graph.add_node("analysis_agent", analysis_agent_graph)
-    # graph.add_node("rag_agent", file_graph)
+def generate_answer_offline(state: ParentGraphState):
+    """Generate the final answer based on the user's message and chat context."""
+    print("\n\nNode - Generate answer...\n\n")
+    message = state["messages"][-1]
+    messages = [message.content, *state["messages"]]
 
-    graph.add_node("generate_answer", generate_answer)
+    analysis = state.get("analysis", None)
+
+    system_message = SystemMessage(SYSTEM_PROMPT.format(analysis=analysis))
+
+    # answer = llm.invoke([system_message,
+    #                     HumanMessage(content=message), *messages])
+    answer = llm.invoke([system_message, *messages])
+    # print(f"\n\n{answer}\n\n")
+    # Return messages properly for MessagesState
+    return {"messages": [answer]}
+
+
+def build_graph():
+    graph.add_node("analysis_agent", react_graph)
+
+    # TODO UNCOMMENT WHEN BACK ONLINE
+    graph.add_node("generate_answer_offline", generate_answer_offline)
     graph.add_node("rewrite_message", rewrite_message)
     graph.add_node("classify_query", classify_query)
     graph.add_edge(START, "rewrite_message")
@@ -147,9 +165,8 @@ def build_graph():
         "classify_query",
         route_query,
     )
-    graph.add_edge("file_agent", "analysis_agent")
-    graph.add_edge("analysis_agent", "generate_answer")
-    graph.add_edge("generate_answer", END)
+    graph.add_edge("analysis_agent", "generate_answer_offline")
+    graph.add_edge("generate_answer_offline", END)
 
     return graph
 
@@ -181,35 +198,19 @@ async def on_message(message: cl.Message):
     }
     document_context = cl.user_session.get("document_context", [])
     answer = cl.Message(content="")
+
+    # OFFLINE SOLUTION
+
     for chunk in app.stream(
-        {"messages": [HumanMessage(content=message.content)],
+        {"messages": [HumanMessage(message.content)],
          "attached_files": attached_files,
          "document_context": document_context},
         config=config,
             stream_mode="messages"):
-        # chunk is a tuple: (node_name, message_data)
         message, metadata = chunk
-        # print(f"Node: {metadata["langgraph_node"]}")
-        if (metadata["langgraph_node"] == "generate_answer"):
+        if (metadata["langgraph_node"] == "generate_answer_offline"):
             await answer.stream_token(message.content)
-        # print(f"message: {message}\n\n")
-        # print(f"metadata: {metadata}\n\n")
-        # await answer.stream_token(message.content)
-        # print(f"Message type: {type(message)}")
-        # print("---")
     await answer.update()
-
-### WORKING STREAM ###
-# for chunk in compiled_graph.stream(
-#         {"messages": [HumanMessage(content="what is cholesterol")]},
-#         config=config,
-#         stream_mode="messages"):
-#     # chunk is a tuple: (node_name, message_data)
-#     message, metadata = chunk
-#     # print(f"Node: {metadata["langgraph_node"]}")
-#     print(f"{message.content}")
-#     # print(f"Message type: {type(message)}")
-#     # print("---")
 
 
 ### TEST GRAPH DIRECTLY ###

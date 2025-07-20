@@ -8,7 +8,8 @@ from typing import Annotated
 from langchain_core.runnables import ensure_config
 from langgraph.config import get_config
 
-from agents.analysis_agent.prompts import SYSTEM_PROMPT
+from agents.file_agent.prompts import SYSTEM_PROMPT
+# from prompts import SYSTEM_PROMPT
 
 
 @dataclass(kw_only=True)

@@ -1,106 +1,137 @@
-"""Define a custom Reasoning and Action agent.
-
-Works with a chat model with tool calling support.
-"""
-
-
-from IPython.display import Image, display
-from langgraph.prebuilt import ToolNode
-from langgraph.prebuilt import tools_condition
-from langgraph.graph import START, StateGraph
-from langgraph.graph import MessagesState
-from langchain_core.messages import HumanMessage, SystemMessage
-from agents.analysis_agent.tools import TOOLS
-from agents.analysis_agent.state import State
+from dotenv import load_dotenv
+import os
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated, Sequence
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage
+from operator import add as add_messages
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain_docling.loader import ExportType
 
-### DEFINE AGENT TOOLS ###
-# define more custom functions here and use Tool.from_function to create tools
-
-simple_llm = ChatOpenAI(model="gpt-4o")
-llm_with_tools = simple_llm.bind_tools(TOOLS)
-memory = InMemorySaver()
-
-
-# TODO create internal custom state AnalysisAgentState - optimized_query (str)
-
-### DEFINE STATES ###
-
-### DEFINE AGENT NODE ###
+# Import tools from the tools module
+from agents.file_agent.tools import TOOLS, load_and_process_pdf
+from agents.file_agent.configuration import Configuration
+from agents.file_agent.state import State
+# from tools import TOOLS, load_and_process_pdf
+# from configuration import Configuration
+# from state import State
 
 
-# TODO move to prompts.py
-# System message
-assistant_system_message = SystemMessage(content=("""
-You are a professional financial assistant specializing in stock market analysis and investment strategies. 
-Your role is to analyze stock data and provide **clear, decisive recommendations** that users can act on, 
-whether they already hold the stock or are considering investing.
+load_dotenv()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-You have access to a set of tools that can provide the data you need to analyze stocks effectively. 
-Use these tools to gather relevant information such as stock symbols, current prices, historical trends, 
-and key financial indicators. Your goal is to leverage these resources efficiently to generate accurate, 
-actionable insights for the user.
+# Configuration constants
+PDF_PATH = "pdf/12_7_2024_Urinalysis.pdf"
+EXPORT_TYPE = ExportType.MARKDOWN
 
-Your responses should be:
-- **Concise and direct**, summarizing only the most critical insights.
-- **Actionable**, offering clear guidance on whether to buy, sell, hold, or wait for better opportunities.
-- **Context-aware**, considering both current holders and potential investors.
-- **Free of speculation**, relying solely on factual data and trends.
+# Initialize LLM
+llm = ChatOpenAI(
+    model="gpt-4o", temperature=0)
 
-### Response Format:
-1. **Recommendation:** Buy, Sell, Hold, or Wait.
-2. **Key Insights:** Highlight critical trends and market factors that influence the decision.
-3. **Suggested Next Steps:** What the user should do based on their current position.
-
-If the user does not specify whether they own the stock, provide recommendations for both potential buyers and current holders. Ensure your advice considers valuation, trends, and market sentiment.
-
-Your goal is to help users make informed financial decisions quickly and confidently.
-"""))
-
-# Node 1
+# Use tools from the tools module
+llm_with_tools = llm.bind_tools(TOOLS)
 
 
-def optimize_request(state: State):
-    """Optimize the request for the analysis agent."""
-    print("\n\nNode - Optimize request...\n\n")
-    # TODO return {"optimized_query":optimized_query} (str - should exist on internal graph state)
-    pass
+# Use helper function to load and process PDF
+# vectorstore = load_and_process_pdf(PDF_PATH, EXPORT_TYPE)
+print(f"Vector store ready with documents from {os.path.basename(PDF_PATH)}!")
 
 
-# TODO ONLY return structured output MedicalAnalysis to parent graph's generate_answer
+def should_continue(state: State):
+    """Check if the last message contains tool calls."""
+    result = state['messages'][-1]
+    return hasattr(result, 'tool_calls') and len(result.tool_calls) > 0
 
 
-def assistant(state: State):
-    print("\n\nNode - analysis assistant...\n\n")
-    response = llm_with_tools.invoke(
-        [assistant_system_message] + state["messages"])
-
-    # TODO return MedicalAnalysis object (should exist on parent state)
-    return {"messages": [response]}
-
-# Node 2 - Tool Node -- defined in the graph edges
-
-### DEFINE AGENT GRAPH ###
+# Get system prompt from configuration
+configuration = Configuration.from_context()
+system_prompt = configuration.system_prompt
 
 
-# Graph
-builder = StateGraph(State)
+# Creating a dictionary of our tools
+tools_dict = {our_tool.name: our_tool for our_tool in TOOLS}
 
-# Define nodes: these do the work
-builder.add_node("assistant", assistant)
-builder.add_node("tools", ToolNode(TOOLS))
-
-# Define edges: these determine how the control flow moves
-# TODO implmement optimize_request to pass to assistant node
-builder.add_edge(START, "assistant")
-builder.add_conditional_edges(
-    "assistant",
-    # If the latest message (result) from assistant is a tool call -> tools_condition routes to tools
-    # If the latest message (result) from assistant is a not a tool call -> tools_condition routes to END
-    tools_condition,
+# LLM Agent
 
 
+# def call_llm(state: AgentState) -> AgentState:
+#     """Function to call the LLM with the current state."""
+#     messages = list(state['messages'])
+#     messages = [SystemMessage(content=system_prompt)] + messages
+#     message = llm_with_tools.invoke(messages)
+#     return {'messages': [message]}
+
+def call_llm(state: State) -> State:
+    """Function to call the LLM with the current state."""
+    messages = list(state['messages'])
+    messages = [SystemMessage(content=system_prompt)] + messages
+
+    attached_files = state.get('attached_files', [])
+    if len(attached_files) > 0:
+        # messages.append(SystemMessage(
+        #     content="You have access to the following files: " + ", ".join(
+        #         [f.metadata.get('name', 'Unknown') for f in has_files])))
+        doc_splits, formatted_docs = load_and_process_pdf(
+            attached_files, EXPORT_TYPE)
+    message = llm_with_tools.invoke(messages)
+    return {'extracted_documents': doc_splits, 'document_context': formatted_docs, 'messages': [message]}
+
+
+# Retriever Agent
+def take_action(state: State) -> State:
+    """Execute tool calls from the LLM's response."""
+
+    tool_calls = state['messages'][-1].tool_calls
+    results = []
+    for t in tool_calls:
+        print(
+            f"Calling Tool: {t['name']} with query: {t['args'].get('query', 'No query provided')}")
+
+        if not t['name'] in tools_dict:  # Checks if a valid tool is present
+            print(f"\nTool: {t['name']} does not exist.")
+            result = "Incorrect Tool Name, Please Retry and Select tool from List of Available tools."
+
+        else:
+            result = tools_dict[t['name']].invoke(t['args'].get('query', ''))
+            print(f"Result length: {len(str(result))}")
+
+        # Appends the Tool Message
+        results.append(ToolMessage(
+            tool_call_id=t['id'], name=t['name'], content=str(result)))
+
+    print("Tools Execution Complete. Back to the model!")
+    return {'messages': results}
+
+
+graph = StateGraph(State)
+graph.add_node("llm", call_llm)
+graph.add_node("retriever_agent", take_action)
+
+graph.add_conditional_edges(
+    "llm",
+    should_continue,
+    {True: "retriever_agent", False: END}
 )
-builder.add_edge("tools", "assistant")
-react_graph = builder.compile(checkpointer=memory)
+graph.add_edge("retriever_agent", "llm")
+graph.set_entry_point("llm")
+
+rag_agent = graph.compile()
+
+
+# def running_agent():
+#     print("\n=== RAG AGENT===")
+
+#     while True:
+#         user_input = input("\nWhat is your question: ")
+#         if user_input.lower() in ['exit', 'quit']:
+#             break
+
+#         # converts back to a HumanMessage type
+#         messages = [HumanMessage(content=user_input)]
+
+#         result = rag_agent.invoke({"messages": messages})
+
+#         print("\n=== ANSWER ===")
+#         print(result['messages'][-1].content)
+
+
+# running_agent()

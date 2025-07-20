@@ -19,3 +19,5 @@ langchain-docling
 ipython
 langchain-anthropic
 langchain_google_genai
+langchain_huggingface
+sentence-transformers

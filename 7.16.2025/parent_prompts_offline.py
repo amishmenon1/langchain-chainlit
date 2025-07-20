@@ -39,10 +39,6 @@ You must classify the user's message intent into one of 3 categories:
             References specific files by name, but does not require medical reasoning
             Medical questions that also reference or require uploaded files for context or analysis
 
-- MISCELLANEOUS:  Messages that do not fit into the above categories, such as greetings, casual conversation, or non-medical topics.
-                  Messages that do not require medical reasoning or analysis, and do not reference any files.
-                  Messages that refer to previous chats or interactions, but do not require specific medical context (e.g. - "What did we talk about last time?", "What was the last message I sent you?", etc.).
-
             
 **Critical Guidelines:**
 - When in doubt between GENERAL and MEDICAL, default to MEDICAL for safety
@@ -53,69 +49,65 @@ You must classify the user's message intent into one of 3 categories:
 
 **Question:** "Hello, how are you today?"
 **Has files:** False
-
 **Output:**
-{{
-  "classification": "GENERAL",
-  "reasoning": "Simple greeting with no medical content or file references"
-}}
+
+"GENERAL"
+
+
 
 **Question:** "My father has been experiencing chest pain for the past hour. What should I do?"
 **Has files:** False
 **Output:**
-{{
-  "classification": "MEDICAL",
-  "reasoning": "Contains urgent medical symptoms (chest pain) requiring immediate medical guidance and potential emergency response"
-}}
 
-**Question:** "Can you analyze this blood test report I just uploaded?"
+ "MEDICAL"
+
+
+ 
+ **Question:** "Can you analyze this blood test report I just uploaded?"
 **Has files:** True
+
 **Output:**
-{{
-  "classification": "MEDICAL",
-  "reasoning": "Directly references an uploaded file (blood test report) and requests analysis of medical documents"
-}}
+"MEDICAL"
+
+
 
 **Question:** "What are the side effects of metformin for someone with diabetes?"
 **Has files:** False
 **Output:**
-{{
-  "classification": "GENERAL",
-  "reasoning": "Contains basic medical terminology (metformin, diabetes) and asks generic question about medication side effects without specific patient context"
-}}
+
+"GENERAL"
+
+
 
 **Question:** "What are the side effects of metformin for someone with diabetes?"
 **Has files:** True
 **Output:**
-{{
-  "classification": "MEDICAL",
-  "reasoning": "Contains medical terminology (metformin, diabetes) and asks about medication side effects requiring clinical knowledge"
-}}
+"MEDICAL"
+
+
 
 **Question:** "I uploaded mom's medication list earlier. Based on that, is it safe for her to take ibuprofen?"
+**Has files:** False
 **Output:**
-{{
-  "classification": "MEDICAL",
-  "reasoning": "References a previously uploaded file (medication list) and asks a medical question requiring analysis of that file data"
-}}
+
+"MEDICAL"
+
+
 
 **Question:** "What's your favorite color?"
 **Has files:** True
-
 **Output:**
-{{
-  "classification": "GENERAL",
-  "reasoning": "The message references an uploaded file, but the question is not medical in nature."
-}}
+
+"GENERAL"
+
+
 
 **Output Format:**
-Return a JSON object with the following structure:
-{{
-  "classification": "MEDICAL|GENERAL|FILE|UNKNOWN",
-  "reasoning": "Brief explanation of classification decision"
-}}
+Return ONLY the classification as 1 string and nothing else:
 
+MEDICAL | GENERAL
 
+----------
 
 Question:
 {message}
@@ -146,22 +138,16 @@ Your role is to transform user messages into standalone, contextually complete m
 - If the original message is already standalone, return it unchanged
 
 **Output Format:**
-Return a structured JSON object:
-{{
-  "rewritten_message": "The contextualized standalone message",
-  "context_added": "Summary of what context was incorporated",
-  "original_intent_preserved": true|false
-}}
+Return a string containing ONLY the rewritten message and nothing else. 
+If there is no prior context, return the original user message.
 
-**Example:**
-Original: "What about that rash we discussed?"
+**Examples:**
+
+Input: "What about that rash we discussed?"
 With Context: Patient John has diabetes, recently started metformin, discussed potential skin reactions yesterday
+
 Output:
-{{
-  "rewritten_message": "What should I know about the rash on John's arm that we discussed yesterday, given his diabetes and recent metformin prescription?",
-  "context_added": "Added patient name (John), medical condition (diabetes), medication (metformin), and temporal context (yesterday's discussion)",
-  "original_intent_preserved": true
-}}
+"What should I know about the rash on John's arm that we discussed yesterday, given his diabetes and recent metformin prescription?"
 
 
 Chat history:
