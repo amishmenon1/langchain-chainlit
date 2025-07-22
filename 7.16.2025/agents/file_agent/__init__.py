@@ -1,9 +1,9 @@
-"""research_agent.
+"""file_agent.
 
-This module defines a custom reasoning and action agent graph.
-It invokes tools in a simple loop.
+This module defines a file processing agent graph that handles PDF document
+analysis and retrieval operations.
 """
 
-from agents.research_agent.graph import graph
+from agents.file_agent.graph import rag_agent
 
-__all__ = ["graph"]
+__all__ = ["rag_agent"]

@@ -23,15 +23,22 @@ class State(AgentState):
     """
 
     # is_last_step: IsLastStep = field(default=False)
-    """
-    Indicates whether the current step is the last one before the graph raises an error.
+    # """
+    # Indicates whether the current step is the last one before the graph raises an error.
 
-    This is a 'managed' variable, controlled by the state machine rather than user code.
-    It is set to 'True' when the step count reaches recursion_limit - 1.
-    """
+    # This is a 'managed' variable, controlled by the state machine rather than user code.
+    # It is set to 'True' when the step count reaches recursion_limit - 1.
+    # """
 
     # Additional attributes can be added here as needed.
     attached_files: List[Document] = field(default_factory=list)
+    has_files: bool = Field(
+        default=False,
+        description="Indicates whether the user has uploaded files with their message."
+    )
+    processed_filenames: Annotated[List[str], {
+        "description": "List of processed filenames"
+    }] = field(default_factory=list)
     ### DOC CHUNKS ###
     # extracted_documents: List[Document] = field(default_factory=list)
     ### MARKDOWN DOCS ###

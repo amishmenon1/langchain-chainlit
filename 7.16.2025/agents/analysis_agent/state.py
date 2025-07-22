@@ -43,6 +43,12 @@ class MedicalAnalysis(BaseModel):
     professional_consultation_recommended: str = Field(
         description="Highlights specific areas where a specialist or healthcare professional should be consulted."
     )
+    follow_up_recommendations: str = Field(
+        description="Suggestions for follow-up actions like scheduling further evaluations, and follow-up questions for specialists."
+    )
+    additional_info_needed: str = Field(
+        description="Specifies any additional information needed to enhance the analysis or clarify the patient's condition."
+    )
     safety_warnings: str = Field(
         description="Critical safety notes, contraindications, or activities/treatments to avoid for patient safety."
     )
@@ -83,12 +89,12 @@ class State(AgentState):
     """
 
     # is_last_step: IsLastStep = field(default=False)
-    """
-    Indicates whether the current step is the last one before the graph raises an error.
+    # """
+    # Indicates whether the current step is the last one before the graph raises an error.
 
-    This is a 'managed' variable, controlled by the state machine rather than user code.
-    It is set to 'True' when the step count reaches recursion_limit - 1.
-    """
+    # This is a 'managed' variable, controlled by the state machine rather than user code.
+    # It is set to 'True' when the step count reaches recursion_limit - 1.
+    # """
 
     # Additional attributes can be added here as needed.
     document_context: Annotated[str, {

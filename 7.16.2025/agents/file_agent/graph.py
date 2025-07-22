@@ -66,14 +66,27 @@ def call_llm(state: State) -> State:
     messages = [SystemMessage(content=system_prompt)] + messages
 
     attached_files = state.get('attached_files', [])
-    if len(attached_files) > 0:
+    all_processed_filenames = state.get('processed_filenames', [])
+    processed_filenames = []
+    new_files = [f for f in attached_files if getattr(
+        f, "name", None) not in all_processed_filenames]
+    print(f"New files to process: {len(new_files)}")
+    doc_splits = []
+
+    if len(new_files) > 0:
         # messages.append(SystemMessage(
         #     content="You have access to the following files: " + ", ".join(
         #         [f.metadata.get('name', 'Unknown') for f in has_files])))
-        doc_splits, formatted_docs = load_and_process_pdf(
-            attached_files, EXPORT_TYPE)
+        doc_splits, formatted_docs, processed_filenames = load_and_process_pdf(
+            new_files, EXPORT_TYPE)
+        # all_processed_filenames.extend(processed_filenames)
+        # all_document_context = formatted_docs)
+
+    print(f"Loaded {len(doc_splits)} documents from attached files.")
     message = llm_with_tools.invoke(messages)
-    return {'extracted_documents': doc_splits, 'document_context': formatted_docs, 'messages': [message]}
+    return {'has_files': False, 'processed_filenames': processed_filenames,
+            'extracted_documents': doc_splits, 'document_context': formatted_docs,
+            'messages': [message]}
 
 
 # Retriever Agent

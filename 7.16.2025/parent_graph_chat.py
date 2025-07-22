@@ -73,7 +73,9 @@ def classify_query(state: ParentGraphState):
             state["messages"][:-1]) if isinstance(m, HumanMessage)),
         ""
     )
+
     has_files = len(state["attached_files"]) > 0
+    print(f"has_files: {has_files}\n\n")
     prompt = ChatPromptTemplate.from_template(CLASSIFY_MSG_PROMPT)
     chain = prompt | llm.with_structured_output(Classification)
 
@@ -83,7 +85,9 @@ def classify_query(state: ParentGraphState):
     print(f"\n\nClassification response: {response}\n\n")
 
     return {
-        "classification": response
+        "classification": response,
+        "has_files": has_files
+
     }
 
 
@@ -95,8 +99,9 @@ def route_query(state: ParentGraphState) -> Literal["analysis_agent", "file_agen
     else:
         classification = "GENERAL"
 
-    has_files = len(state["attached_files"]) > 0
-
+    has_files = state["has_files"]
+    print(
+        f"routing - has files: {has_files}, classification: {classification}\n\n")
     if has_files:
         print("\n\nRouting to file agent...\n\n")
         return "file_agent"
@@ -120,15 +125,14 @@ def generate_answer(state: ParentGraphState):
     message = state["rewritten_message"]
 
     analysis = state.get("analysis", None)
-
+    document_context = state.get("document_context", None)
+    print(f"Document context: {document_context}\n\n")
     system_message = SystemMessage(
-        content=SYSTEM_PROMPT.format(analysis=analysis))
+        content=SYSTEM_PROMPT.format(analysis=analysis, document_context=document_context))
 
-    print(f"last message: {state['messages'][-1]}\n\n")
-    print(f"last message rewritten: {message}\n\n")
     answer = llm.invoke([system_message,
                         HumanMessage(content=message), *messages])
-    print(f"\n\n{answer}\n\n")
+    print(f"\n\nFINAL ANSWER:\n{answer}\n\n")
     # Return messages properly for MessagesState
     return {"messages": [answer]}
 
@@ -143,11 +147,10 @@ def build_graph():
     graph.add_node("classify_query", classify_query)
     graph.add_edge(START, "rewrite_message")
     graph.add_edge("rewrite_message", "classify_query")
-    graph.add_conditional_edges(
-        "classify_query",
-        route_query,
-    )
-    graph.add_edge("file_agent", "analysis_agent")
+    graph.add_conditional_edges("classify_query", route_query)
+    graph.add_conditional_edges("file_agent", route_query)
+    # graph.add_edge("file_agent", "analysis_agent")
+    # graph.add_edge("file_agent", "generate_answer")
     graph.add_edge("analysis_agent", "generate_answer")
     graph.add_edge("generate_answer", END)
 

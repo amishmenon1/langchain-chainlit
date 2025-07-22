@@ -155,7 +155,7 @@ def load_pdf_documents(files: List[Document], export_type: ExportType = ExportTy
         except Exception as e:
             print(f"Error processing {file.name}: {str(e)}")
 
-    return extracted_docs  # , processed_filenames
+    return extracted_docs, processed_filenames
     # try:
     #     # Initialize DoclingLoader
     #     pdf_loader = DoclingLoader(
@@ -296,7 +296,8 @@ def load_and_process_pdf(files: List[Document], export_type: ExportType = Export
         export_type: Type of export format to use
 
     Returns:
-        ChromaDB vector store instance with all processed documents
+        doc_splits: All processed documents
+        formatted_docs: Formatted string containing all document content
 
     Raises:
         FileNotFoundError: If any PDF file doesn't exist
@@ -304,7 +305,7 @@ def load_and_process_pdf(files: List[Document], export_type: ExportType = Export
     """
     try:
         # Step 1: Load PDF documents
-        docs = load_pdf_documents(files, export_type)
+        docs, processed_filenames = load_pdf_documents(files, export_type)
 
         # Step 2: Process documents for chunking
         doc_splits, formatted_docs = process_documents_for_chunking(
@@ -314,7 +315,8 @@ def load_and_process_pdf(files: List[Document], export_type: ExportType = Export
         vector_store = add_documents_to_vector_store(doc_splits)
 
         # print(f"🎉 Successfully processed PDF: {os.path.basename(file_path)}")
-        return doc_splits, formatted_docs
+        print(f"doc splits: {doc_splits}")
+        return doc_splits, formatted_docs, processed_filenames
 
     except Exception as e:
         print(f"❌ Error in PDF processing pipeline: {str(e)}")

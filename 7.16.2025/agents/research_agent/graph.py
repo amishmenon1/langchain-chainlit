@@ -20,7 +20,7 @@ from langchain.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 from agents.research_agent.state import MedicalAnalysis
-from agents.research_agent.prompts import SYSTEM_PROMPT
+from agents.research_agent.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT2
 from langchain_openai import ChatOpenAI
 import chainlit as cl
 
@@ -43,23 +43,16 @@ async def call_model(state: State) -> State:
     Returns:
         dict: A dictionary containing the model's response message.
     """
-    # print(f"state: {state}")
-    # print(f"state keys: {list(state.keys())}")
+
     messages = state.get("messages", [])
+    message = messages[-1] if messages else None
     document_context = state.get("document_context", [])
 
     configuration = Configuration.from_context()
-    #### Format the system prompt. Customize this to change the agent's behavior. ####
-
-    system_message = configuration.system_prompt.format(
-        document_context=state.get("document_context", []))
 
     # Initialize the model with tool binding. Change the model or add more tools here.
     model = load_chat_model(
         configuration.model).bind_tools(TOOLS)
-
-    prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
-    chain = prompt | default_llm.with_structured_output(MedicalAnalysis)
 
     #### Get the model's response ####
     # async with cl.Step(name="🤖 Research Agent", type="run") as step:
@@ -70,12 +63,16 @@ async def call_model(state: State) -> State:
     #     ),
     # )
 
-    response = cast(
-        AIMessage,
-        await chain.ainvoke(
-            {"document_context": state.get("document_context", [])}
-        ),
-    )
+    # response = chain.invoke(
+    #         {"document_context": state.get("document_context", []),
+    #          "messages": messages}
+    #     ),
+    sys_msg = SYSTEM_PROMPT2.format(
+        document_context=document_context, user_message=message.content)
+
+    response = model.invoke(
+        [sys_msg, HumanMessage(content=message.content), *messages])
+
     print(f"\nresearch agent response: {response}\n")
     #### Handle the case when it's the last step and the model still wants to use a tool ####
     # if state.get("is_last_step", False) and response["tool_calls"]:
@@ -90,7 +87,7 @@ async def call_model(state: State) -> State:
 
     #### Return the model's response as a list to be added to existing messages ####
     # return {"messages": [response]}
-    return {"analysis": response}
+    return {"research_context": response}
 
 
 # Define a new graph

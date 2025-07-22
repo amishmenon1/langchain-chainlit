@@ -1,9 +1,9 @@
-"""research_agent.
+"""analysis_agent.
 
-This module defines a custom reasoning and action agent graph.
-It invokes tools in a simple loop.
+This module defines a medical analysis agent that provides specialized
+medical and health information using research tools.
 """
 
-from agents.research_agent.graph import graph
+from agents.analysis_agent.graph import react_graph
 
-__all__ = ["graph"]
+__all__ = ["react_graph"]

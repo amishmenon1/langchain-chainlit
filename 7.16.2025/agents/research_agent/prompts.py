@@ -105,7 +105,6 @@ SYSTEM_PROMPT2 = """You are a research agent.
 
 INSTRUCTIONS:
 - Assist with medical and research-related tasks
-- After you're done with your tasks, respond to the supervisor directly
 - Respond ONLY with the results of your work, do NOT include ANY other text.
 
 
@@ -117,6 +116,11 @@ and relevant educational insights.
 
 ----------
 
-Document context: {document_context}
+Document context: 
+{document_context}
+
+
+User message:
+{user_message}
 
 """

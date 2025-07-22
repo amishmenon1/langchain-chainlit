@@ -19,8 +19,9 @@ from langchain.prompts import ChatPromptTemplate
 from typing import cast, Literal
 from langchain_community.llms.ollama import Ollama
 from langchain.chat_models import init_chat_model
+from dotenv import load_dotenv
 
-
+load_dotenv()
 simple_llm = ChatOpenAI(model="gpt-4o")
 llm_with_tools = simple_llm.bind_tools(TOOLS)
 

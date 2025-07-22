@@ -96,8 +96,9 @@ class ParentGraphState(MessagesState):
     analysis: MedicalAnalysis = Field(
         description="Analysis results"
     )
-    attached_files: Annotated[List[Document], {
-        "description": "List of files attached by the user"}] = field(default_factory=list)
+    # attached_files: Annotated[List[Document], {
+    #     "description": "List of files attached by the user"}] = field(default_factory=list)
+    attached_files: List[Document] = field(default_factory=list)
     retrieved_documents: Annotated[List[Document], {
         "description": "List of retrieved documents"}] = field(default_factory=list)
     document_context: Annotated[str, {
