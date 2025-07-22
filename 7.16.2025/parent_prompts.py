@@ -16,6 +16,9 @@ If document context AND a medical report are provided, verify that no critical i
 
 If the user’s context is unclear or insufficient, clarify assumptions and provide generalized guidance.
 
+User message:
+{message}
+
 Document context:
 {document_context}
 

@@ -57,8 +57,6 @@ def assistant(state: State):
     document_context = state.get("document_context", "")
     system_msg = ANALYSIS_SYSTEM_PROMPT.format(
         document_context=document_context, user_message=user_message.content)
-    prompt = ChatPromptTemplate.from_messages(
-        [SystemMessage(content=system_msg)])
 
     response = cast(
         AIMessage,

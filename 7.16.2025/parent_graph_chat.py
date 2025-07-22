@@ -123,12 +123,11 @@ def generate_answer(state: ParentGraphState):
     print("\n\nNode - Generate answer...\n\n")
     messages = state["messages"]
     message = state["rewritten_message"]
+    document_context = state.get("document_context", "")
 
     analysis = state.get("analysis", None)
-    document_context = state.get("document_context", None)
-    print(f"Document context: {document_context}\n\n")
     system_message = SystemMessage(
-        content=SYSTEM_PROMPT.format(analysis=analysis, document_context=document_context))
+        content=SYSTEM_PROMPT.format(message=message, analysis=analysis, document_context=document_context))
 
     answer = llm.invoke([system_message,
                         HumanMessage(content=message), *messages])
@@ -140,7 +139,6 @@ def generate_answer(state: ParentGraphState):
 def build_graph():
     graph.add_node("file_agent", file_agent_graph)
     graph.add_node("analysis_agent", analysis_agent_graph)
-    # graph.add_node("rag_agent", file_graph)
 
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("rewrite_message", rewrite_message)

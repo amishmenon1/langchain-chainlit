@@ -53,13 +53,6 @@ tools_dict = {our_tool.name: our_tool for our_tool in TOOLS}
 # LLM Agent
 
 
-# def call_llm(state: AgentState) -> AgentState:
-#     """Function to call the LLM with the current state."""
-#     messages = list(state['messages'])
-#     messages = [SystemMessage(content=system_prompt)] + messages
-#     message = llm_with_tools.invoke(messages)
-#     return {'messages': [message]}
-
 def call_llm(state: State) -> State:
     """Function to call the LLM with the current state."""
     messages = list(state['messages'])
@@ -72,15 +65,10 @@ def call_llm(state: State) -> State:
         f, "name", None) not in all_processed_filenames]
     print(f"New files to process: {len(new_files)}")
     doc_splits = []
-
+    formatted_docs = ""
     if len(new_files) > 0:
-        # messages.append(SystemMessage(
-        #     content="You have access to the following files: " + ", ".join(
-        #         [f.metadata.get('name', 'Unknown') for f in has_files])))
         doc_splits, formatted_docs, processed_filenames = load_and_process_pdf(
             new_files, EXPORT_TYPE)
-        # all_processed_filenames.extend(processed_filenames)
-        # all_document_context = formatted_docs)
 
     print(f"Loaded {len(doc_splits)} documents from attached files.")
     message = llm_with_tools.invoke(messages)
