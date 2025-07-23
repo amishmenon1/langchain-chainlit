@@ -1,5 +1,3 @@
-
-
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from agents.analysis_agent.graph import react_graph as analysis_agent_graph
@@ -33,104 +31,98 @@ memory = InMemorySaver()
 graph = StateGraph(ParentGraphState)
 
 
-def rewrite_message(state: ParentGraphState):
+async def rewrite_message(state: ParentGraphState):
+    # with cl.Step(name="Thinking...", type="run") as step:
     print(f"\nrewriting message...\n")
-    # state["retrieved_docs"] = []
     state["rewritten_message"] = ""
-    # # Extract the last user message (prior to current) if needed.
+    # Extract the last user message (prior to current) if needed.
     previous_user_message = next(
         (m.content for m in reversed(
             state["messages"][:-1]) if isinstance(m, HumanMessage)),
         ""
     )
-
     conversation = state["messages"][:-1]
     current_question = state["messages"][-1]
     document_context = state.get("document_context", None)
-
+    response = None
+    better_question = ""
     rephrase_prompt = ChatPromptTemplate.from_template(
         MSG_REWRITER_SYSTEM_PROMPT)
-
     chain = rephrase_prompt | llm.with_structured_output(
         RewrittenMessage)
-
-    response = chain.invoke(
+    response = await chain.ainvoke(
         {"history": conversation, "context": document_context, "message": current_question, "previous_user_message": previous_user_message})
     better_question = response.rewritten_message.strip()
     print(f"\n\nrewriter response:\n{response}\n\n")
     return {
         "rewritten_message": better_question,
-        "document_context": document_context
+        "document_context": document_context,
     }
 
 
-def classify_query(state: ParentGraphState):
+async def classify_query(state: ParentGraphState):
     """Classify the user's message to determine the next step in the graph."""
-    user_message = state["messages"][-1]
+    # with cl.Step(name="Interpreting message...", type="run") as step:
     rewritten_message = state["rewritten_message"]
     previous_user_message = next(
         (m.content for m in reversed(
             state["messages"][:-1]) if isinstance(m, HumanMessage)),
         ""
     )
-
     has_files = len(state["attached_files"]) > 0
     print(f"has_files: {has_files}\n\n")
     prompt = ChatPromptTemplate.from_template(CLASSIFY_MSG_PROMPT)
     chain = prompt | llm.with_structured_output(Classification)
-
-    response = chain.invoke({"message": rewritten_message,
-                            "previous_user_message": previous_user_message,
-                             "has_files": has_files})
+    response = await chain.ainvoke({"message": rewritten_message,
+                                    "previous_user_message": previous_user_message,
+                                    "has_files": has_files})
     print(f"\n\nClassification response: {response}\n\n")
 
     return {
         "classification": response,
-        "has_files": has_files
-
+        "has_files": has_files,
     }
 
 
-def route_query(state: ParentGraphState) -> Literal["analysis_agent", "file_agent", "generate_answer"]:
+async def route_query(state: ParentGraphState) -> Literal["analysis_agent", "file_agent", "generate_answer"]:
     """Route the query based on classification."""
-    classificationState = state.get("classification", None)
-    if classificationState:
-        classification = classificationState.classification
-    else:
-        classification = "GENERAL"
+    # cl.context.current_step.__exit__(None, None, None)
+    # await cl.Step(name="Routing query...").send()
+    # await cl.context.current_step.update()
+    with cl.Step(name="Routing query...") as step:
+        classificationState = state.get("classification", None)
+        if classificationState:
+            classification = classificationState.classification
+        else:
+            classification = "GENERAL"
+        has_files = state["has_files"]
+        print(
+            f"routing - has files: {has_files}, classification: {classification}\n\n")
+        if has_files:
+            print("\n\nRouting to file agent...\n\n")
+            return "file_agent"
+        if classification == "GENERAL":
+            print("\n\nRouting to generate_answer...\n\n")
+            return "generate_answer"
+        elif classification == "MEDICAL":
+            print("\n\nRouting to analysis_agent...\n\n")
+            return "analysis_agent"
+        else:
+            print("\n\nUnknown classification, routing to generate_answer...\n\n")
+            return "generate_answer"
 
-    has_files = state["has_files"]
-    print(
-        f"routing - has files: {has_files}, classification: {classification}\n\n")
-    if has_files:
-        print("\n\nRouting to file agent...\n\n")
-        return "file_agent"
-        # return "file_agent"
-    if classification == "GENERAL":
-        print("\n\nRouting to generate_answer...\n\n")
-        return "generate_answer"
-    elif classification == "MEDICAL":
-        print("\n\nRouting to analysis_agent...\n\n")
-        return "analysis_agent"
-    else:
-        print("\n\nUnknown classification, routing to generate_answer...\n\n")
-        return "generate_answer"
-# TODO update prompt to ask user if they want a deeper analysis
 
-
-def generate_answer(state: ParentGraphState):
-    """Generate the final answer based on the user's message and chat context."""
+async def generate_answer(state: ParentGraphState):
     print("\n\nNode - Generate answer...\n\n")
     messages = state["messages"]
     message = state["rewritten_message"]
     document_context = state.get("document_context", "")
-
     analysis = state.get("analysis", None)
     system_message = SystemMessage(
+        # TODO update prompt to always ask user if they want a deeper analysis
         content=SYSTEM_PROMPT.format(message=message, analysis=analysis, document_context=document_context))
-
-    answer = llm.invoke([system_message,
-                        HumanMessage(content=message), *messages])
+    answer = await llm.ainvoke([system_message,
+                                HumanMessage(content=message), *messages])
     print(f"\n\nFINAL ANSWER:\n{answer}\n\n")
     # Return messages properly for MessagesState
     return {"messages": [answer]}
@@ -147,8 +139,6 @@ def build_graph():
     graph.add_edge("rewrite_message", "classify_query")
     graph.add_conditional_edges("classify_query", route_query)
     graph.add_conditional_edges("file_agent", route_query)
-    # graph.add_edge("file_agent", "analysis_agent")
-    # graph.add_edge("file_agent", "generate_answer")
     graph.add_edge("analysis_agent", "generate_answer")
     graph.add_edge("generate_answer", END)
 
@@ -181,23 +171,33 @@ async def on_message(message: cl.Message):
         "configurable": {"thread_id": cl.context.session.thread_id},
     }
     document_context = cl.user_session.get("document_context", [])
+
+    # Step: User message received
+
     answer = cl.Message(content="")
-    for chunk in app.stream(
-        {"messages": [HumanMessage(content=message.content)],
-         "attached_files": attached_files,
-         "document_context": document_context},
+    step = None
+    step_active = False  # Track if the step is currently active
+
+    async for chunk in app.astream(
+        {
+            "messages": [HumanMessage(content=message.content)],
+            "attached_files": attached_files,
+            "document_context": document_context
+        },
         config=config,
-            stream_mode="messages"):
-        # chunk is a tuple: (node_name, message_data)
+        stream_mode="messages"
+    ):
         message, metadata = chunk
-        # print(f"Node: {metadata["langgraph_node"]}")
-        if (metadata["langgraph_node"] == "generate_answer"):
+        node = metadata.get("langgraph_node")
+        in_step_nodes = node in ("rewrite_message", "classify_query")
+
+        if in_step_nodes and cl.context.current_step.name != "Thinking...":
+            step = cl.Step(name="Thinking...", type="run")
+            step.__enter__()
+
+        if node == "generate_answer":
             await answer.stream_token(message.content)
-        # print(f"message: {message}\n\n")
-        # print(f"metadata: {metadata}\n\n")
-        # await answer.stream_token(message.content)
-        # print(f"Message type: {type(message)}")
-        # print("---")
+
     await answer.update()
 
 ### WORKING STREAM ###

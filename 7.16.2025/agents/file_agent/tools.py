@@ -230,6 +230,7 @@ def process_documents_for_chunking(docs: List[Document], export_type: ExportType
         return "\n\n".join(doc.page_content for doc in docs)
 
     formatted_docs = format_docs(docs)
+
     return splits, formatted_docs
 
 

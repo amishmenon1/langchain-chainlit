@@ -20,6 +20,7 @@ from typing import cast, Literal
 from langchain_community.llms.ollama import Ollama
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
+import chainlit as cl
 
 load_dotenv()
 simple_llm = ChatOpenAI(model="gpt-4o")
@@ -32,29 +33,23 @@ llm_with_tools = simple_llm.bind_tools(TOOLS)
 memory = InMemorySaver()
 
 
-# TODO create internal custom state AnalysisAgentState - optimized_query (str)
-
-### DEFINE STATES ###
-
-### DEFINE AGENT NODES ###
-
-
-# Node 1
+# def optimize_request(state: State):
+#     """Optimize the request for the analysis agent."""
+#     print("\n\nNode - Optimize request...\n\n")
+#     # TODO return {"optimized_query":optimized_query} (str - should exist on internal graph state)
+#     pass
 
 
-def optimize_request(state: State):
-    """Optimize the request for the analysis agent."""
-    print("\n\nNode - Optimize request...\n\n")
-    # TODO return {"optimized_query":optimized_query} (str - should exist on internal graph state)
-    pass
-
-
-def assistant(state: State):
+async def assistant(state: State):
     """Run the analysis assistant with the provided state."""
+    cl.context.current_step.name = "Medical Analysis Agent"
+    await cl.context.current_step.update()
     print("\n\nNode - analysis assistant...\n\n")
     messages = state["messages"]
     user_message = state["messages"][-1]
     document_context = state.get("document_context", "")
+    response = ""
+    # with cl.Step(name="Medical Analysis Agent...") as step:
     system_msg = ANALYSIS_SYSTEM_PROMPT.format(
         document_context=document_context, user_message=user_message.content)
 
@@ -64,14 +59,8 @@ def assistant(state: State):
             [SystemMessage(content=system_msg), *messages]
         ),
     )
-
-    # response = cast(
-    #     AIMessage,
-    #     simple_llm.invoke(
-    #         [SystemMessage(content=system_msg), *messages]
-    #     ),
-    # )
-
+    cl.context.current_step.output = "Analysis complete! Returning to chat..."
+    await cl.context.current_step.update()
     print(f"AGENT response: {response}\n\n")
 
     # TODO return MedicalAnalysis object (should exist on parent state)
@@ -80,7 +69,7 @@ def assistant(state: State):
 # Node 2 - Tool Router node
 
 
-def route_model_output(state: State) -> Literal["__end__", "tools"]:
+async def route_model_output(state: State) -> Literal["__end__", "tools"]:
     """Determine the next node based on the model's output.
 
     This function checks if the model's last message contains tool calls.

@@ -2,10 +2,11 @@ from dotenv import load_dotenv
 import os
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated, Sequence
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage, AIMessage
 from operator import add as add_messages
 from langchain_openai import ChatOpenAI
 from langchain_docling.loader import ExportType
+import asyncio
 
 # Import tools from the tools module
 from agents.file_agent.tools import TOOLS, load_and_process_pdf
@@ -14,6 +15,7 @@ from agents.file_agent.state import State
 # from tools import TOOLS, load_and_process_pdf
 # from configuration import Configuration
 # from state import State
+import chainlit as cl
 
 
 load_dotenv()
@@ -53,11 +55,13 @@ tools_dict = {our_tool.name: our_tool for our_tool in TOOLS}
 # LLM Agent
 
 
-def call_llm(state: State) -> State:
-    """Function to call the LLM with the current state."""
+async def call_llm(state: State) -> State:
+    """Async function to call the LLM with the current state."""
+    cl.context.current_step.name = "Processing files..."
+    await cl.context.current_step.update()
+
     messages = list(state['messages'])
     messages = [SystemMessage(content=system_prompt)] + messages
-
     attached_files = state.get('attached_files', [])
     all_processed_filenames = state.get('processed_filenames', [])
     processed_filenames = []
@@ -66,21 +70,31 @@ def call_llm(state: State) -> State:
     print(f"New files to process: {len(new_files)}")
     doc_splits = []
     formatted_docs = ""
+    message = AIMessage(content="No files were found.")
+    # with cl.Step(name="Processing files...") as step:
     if len(new_files) > 0:
-        doc_splits, formatted_docs, processed_filenames = load_and_process_pdf(
-            new_files, EXPORT_TYPE)
 
-    print(f"Loaded {len(doc_splits)} documents from attached files.")
-    message = llm_with_tools.invoke(messages)
+        # cl.context.current_step.name = "Processing files..."
+        # await cl.context.current_step.update()
+        # If load_and_process_pdf is not async, run in thread
+        doc_splits, formatted_docs, processed_filenames = await asyncio.to_thread(
+            load_and_process_pdf, new_files, EXPORT_TYPE)
+        print(f"Loaded {len(doc_splits)} documents from attached files.")
+        # If llm_with_tools.invoke is not async, run in thread
+    message = await asyncio.to_thread(llm_with_tools.invoke, messages)
+    cl.context.current_step.output = f"Successfully loaded {len(processed_filenames)} files."
+    await cl.context.current_step.update()
+    # cl.context.current_step.name = "Analyzing query..."
+    # await cl.context.current_step.update()
+    # with cl.Step(name="Analyzing file data...") as step:
     return {'has_files': False, 'processed_filenames': processed_filenames,
             'extracted_documents': doc_splits, 'document_context': formatted_docs,
             'messages': [message]}
 
 
 # Retriever Agent
-def take_action(state: State) -> State:
-    """Execute tool calls from the LLM's response."""
-
+async def take_action(state: State) -> State:
+    """Async function to execute tool calls from the LLM's response."""
     tool_calls = state['messages'][-1].tool_calls
     results = []
     for t in tool_calls:
@@ -90,9 +104,9 @@ def take_action(state: State) -> State:
         if not t['name'] in tools_dict:  # Checks if a valid tool is present
             print(f"\nTool: {t['name']} does not exist.")
             result = "Incorrect Tool Name, Please Retry and Select tool from List of Available tools."
-
         else:
-            result = tools_dict[t['name']].invoke(t['args'].get('query', ''))
+            # If tool is not async, run in thread
+            result = await asyncio.to_thread(tools_dict[t['name']].invoke, t['args'].get('query', ''))
             print(f"Result length: {len(str(result))}")
 
         # Appends the Tool Message
