@@ -9,7 +9,7 @@ from langchain_docling.loader import ExportType
 import asyncio
 
 # Import tools from the tools module
-from agents.file_agent.tools import TOOLS, load_and_process_pdf
+from agents.file_agent.tools import TOOLS, load_and_process_pdf, get_vector_store
 from agents.file_agent.configuration import Configuration
 from agents.file_agent.state import State
 # from tools import TOOLS, load_and_process_pdf
@@ -35,7 +35,6 @@ llm_with_tools = llm.bind_tools(TOOLS)
 
 # Use helper function to load and process PDF
 # vectorstore = load_and_process_pdf(PDF_PATH, EXPORT_TYPE)
-print(f"Vector store ready with documents from {os.path.basename(PDF_PATH)}!")
 
 
 def should_continue(state: State):

@@ -39,6 +39,11 @@ collection = client.get_or_create_collection(COLLECTION_NAME)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
 
+def clear_document_store():
+    # Delete all documents in the collection
+    collection.delete(where={"id": {"$ne": ""}})
+
+
 def get_vector_store() -> Optional[Chroma]:
     """Get or create the ChromaDB vector store instance.
 

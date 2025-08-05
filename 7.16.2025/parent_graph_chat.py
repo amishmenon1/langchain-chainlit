@@ -2,6 +2,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from agents.analysis_agent.graph import react_graph as analysis_agent_graph
 from agents.file_agent.graph import rag_agent as file_agent_graph
+from agents.file_agent.tools import clear_document_store
 from langchain_community.llms.ollama import Ollama
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -27,6 +28,18 @@ import chainlit as cl
 llm = ChatOpenAI(model="gpt-4o")
 # llm = Ollama(model="llama3.1:8b")
 memory = InMemorySaver()
+
+
+@cl.action_callback(name="clear_document_store")
+async def on_action(action):
+    """Clear the document store."""
+    async with cl.Step(name="Clearing document store...") as step:
+        clear_document_store()
+        cl.user_session.set("document_context", [])
+        await cl.Message(content=f"Executed {action.name}").send()
+        # Optionally remove the action button from the chatbot user interface
+        await action.remove()
+        step.output = "Document store cleared successfully!"
 
 
 @cl.on_chat_start
@@ -174,6 +187,13 @@ I'm here to help you with:
 *Your documents are processed securely and privately.*"""
 
     await cl.Message(content=welcome_message).send()
+    # Sending an action button within a chatbot message
+    actions = [
+        cl.Action(name="clear_document_store", payload={
+                  "value": "example_value"}, label="Click me!")
+    ]
+
+    await cl.Message(content="Interact with this action button:", actions=actions).send()
 
 
 @cl.on_message
